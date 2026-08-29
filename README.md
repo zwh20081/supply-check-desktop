@@ -93,6 +93,31 @@ bun run tauri build --no-bundle    # 只出可执行文件，不打包安装程�
 
 侧车产物带目标三元组后缀（`supply-check-sdk-x86_64-pc-windows-msvc.exe`），这是 Tauri `externalBin` 的约定；Tauri 打包时会去掉后缀。`sdk_bridge.rs` 里 `resolve_sidecar` 会依次在资源目录、可执行文件同级目录、`src-tauri/binaries/` 里找两种命名，所以 dev 和打包后都能定位到。
 
+交叉编译侧车（CI 用，本地一般不需要）：
+
+```powershell
+bun scripts/build-sidecar.ts --target=aarch64-apple-darwin
+```
+
+侧车是纯 Go 且 `CGO_ENABLED=0`，六个 target 在任意宿主上都能编出来。Tauri 本体不行，必须在目标平台原生构建。
+
+## CI 与发布
+
+`.github/workflows/ci.yml` 每次 push 跑三件事：侧车的 `go vet` + `go test -race` + 六平台交叉编译、前端的 `tsc` + `vite build`、以及三平台的 `cargo test`。`-race` 不是可选项 —— 并发改成请求级之后所有模型 goroutine 同时写 `reports[]` 并共享计数器。
+
+`.github/workflows/release.yml` 由 `v*` tag 触发（也可手动 dispatch），出六份产物并建草稿 release：
+
+| 平台 | 产物 |
+| --- | --- |
+| Windows x64 / arm64 | `.msi`（en-US 与 zh-CN 各一份） |
+| macOS x64 / arm64 | `.dmg` |
+| Linux x64 | `.deb` + `.AppImage` |
+| Linux arm64 | `.deb` |
+
+只有 Linux arm64 走交叉编译，需要 arm64 版 WebKitGTK/GTK。那里要把主 apt 源限定成 `[arch=amd64]` 再另加 ports 源，否则 `apt update` 会因为 amd64 源不提供 arm64 包而大量 404。bundle 类型在工作流里按平台显式指定，没有沿用 config 里的 `"targets": "all"` —— 那个在 Linux 上会连 rpm 一起打，在 Ubuntu runner 上常因缺依赖失败；Linux arm64 只出 deb，因为 AppImage 的打包工具跑在 amd64 上，交叉场景不可靠。
+
+产物**未做代码签名**，macOS 和 Windows 首次打开都需要手动允许。
+
 ## 测试
 
 ```powershell

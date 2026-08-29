@@ -55,7 +55,7 @@ jobs:
             cross: true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -117,10 +117,15 @@ jobs:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: Supply Check ${{ github.event.inputs.tag || github.ref_name }}
           releaseBody: |
-            填入 API Base 与密钥，用厂商官方 SDK 逐个模型跑完整 22 项探针套件。
+            Fill in an API base URL and key, then run the full 22-probe suite
+            against every model using the vendor's official SDK.
 
-            下载对应平台的安装包：Windows 用 `.msi`，macOS 用 `.dmg`，Linux 用 `.AppImage` 或 `.deb`。
-            macOS 与 Windows 的产物未做代码签名，首次打开需要手动允许。
+            Pick the installer for your platform: `.msi` on Windows, `.dmg` on
+            macOS, `.AppImage` or `.deb` on Linux. The UI ships in English and
+            Chinese and follows your system language on first launch.
+
+            Neither the macOS nor the Windows build is code-signed, so the first
+            launch needs a manual override.
           releaseDraft: true
           prerelease: false
           # 显式限定 bundle 类型：tauri.conf.json 里是 "all"，在 Linux 上会
