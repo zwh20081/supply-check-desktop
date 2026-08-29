@@ -1,0 +1,30 @@
+{
+  "name": "supply-check-desktop",
+  "private": true,
+  "version": "0.1.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 1420",
+    "frontend:build": "tsc && vite build",
+    "build": "bun run sidecar:build && tauri build",
+    "preview": "vite preview",
+    "sidecar:build": "bun scripts/build-sidecar.ts",
+    "tauri": "bun run sidecar:build && tauri",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@fluentui/react-components": "^9.74.7",
+    "@phosphor-icons/react": "^2.1.10",
+    "@tauri-apps/api": "^2.8.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.4",
+    "@types/react": "^18.3.24",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3"
+  }
+}

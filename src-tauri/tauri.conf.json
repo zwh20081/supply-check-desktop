@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "货源体检",
+  "version": "0.1.1",
+  "identifier": "com.supplycheck.desktop",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "bun run frontend:build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Supply Check",
+        "width": 1240,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 640,
+        "resizable": true,
+        "center": true,
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["acrylic", "mica"]
+        }
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "OpenAI、Claude 与 Google 模型货源体检工具",
+    "externalBin": ["binaries/supply-check-sdk"],
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      }
+    }
+  }
+}

@@ -1,0 +1,62 @@
+/* 只保留画布层。组件样式全部走 Fluent makeStyles + tokens（见 useAppStyles.ts）。 */
+
+:root {
+  font-family: "Segoe UI Variable", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+
+  /* Acrylic 在窗口背后提供系统级模糊，画布保留透明度，
+     只叠一层染色来稳定文字对比度。 */
+  --canvas: rgb(7 9 8 / 22%);
+  --mesh-a: rgb(45 212 191 / 22%);
+  --mesh-b: rgb(56 189 248 / 17%);
+  --mesh-c: rgb(16 185 129 / 15%);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --canvas: rgb(238 242 241 / 26%);
+    --mesh-a: rgb(13 148 136 / 18%);
+    --mesh-b: rgb(14 165 233 / 14%);
+    --mesh-c: rgb(16 185 129 / 12%);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root, .fui-FluentProvider {
+  min-height: 100%;
+  background-color: transparent;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100dvh;
+  overflow-x: hidden;
+  background-color: var(--canvas);
+}
+
+/* 玻璃背后的光源。固定层，不随内容滚动，所以不会引起重绘。 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: -20% -10%;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(38rem 30rem at 10% -6%, var(--mesh-a), transparent 64%),
+    radial-gradient(34rem 28rem at 94% 6%, var(--mesh-b), transparent 62%),
+    radial-gradient(40rem 34rem at 58% 106%, var(--mesh-c), transparent 66%);
+}
+
+::selection { background: rgb(94 234 212 / 30%); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
