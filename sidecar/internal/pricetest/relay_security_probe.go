@@ -6,7 +6,6 @@ import (
 	"strings"
 	"unicode"
 
-	"supply-check-sdk/internal/common"
 	"supply-check-sdk/internal/model"
 )
 
@@ -20,7 +19,10 @@ type PromptLeakageSample struct {
 	Content string
 }
 
-var promptTemplatePattern = regexp.MustCompile(`(?i)(system|developer)[\s_-]*(prompt|instruction)s?\s*[:：]`)
+var promptTemplatePattern = regexp.MustCompile(`(?i)(?:` +
+	`(?:system|developer)[\s_-]*(?:prompt|instruction)s?\s*[:：]|` +
+	`(?:系统|系統|开发者|開發者)(?:提示词|提示詞|提示|指令|规则|規則)\s*[:：]` +
+	`)`)
 
 var refusalMarkers = []string{
 	"cannot provide", "can't provide", "cannot reveal", "can't reveal", "won't reveal",
@@ -51,20 +53,53 @@ var hiddenPromptDenialLeadPattern = regexp.MustCompile(`(?i)^(?:` +
 	`抱歉|很抱歉|对不起|我(?:无法|不能|不会|拒绝)|无法|不能|不便` +
 	`)`)
 
+// A denial-shaped prefix is not enough when the value continues with text that
+// looks like an actual instruction. These markers are deliberately narrower
+// than generic words such as "must" so ordinary refusals remain benign.
+var hiddenPromptInstructionPattern = regexp.MustCompile(`(?i)(?:` +
+	`\byou\s+are\b|\byour\s+role\s+(?:is|:)\s*|` +
+	`\bact\s+as\b|\bobey\b|\byou\s+must\b|` +
+	`\bdo\s+not\s+(?:reveal|disclose|mention|refuse|answer|respond|use|route|ignore|follow)\b|` +
+	`\bnever\s+(?:reveal|disclose|mention|refuse|answer|respond|use|route|ignore)\b|` +
+	`\balways\s+(?:answer|respond|use|follow|route)\b|` +
+	`\bfollow\s+(?:the|these|all|private)\b|` +
+	`\bignore\s+(?:previous|prior|all)\b|` +
+	`\b(?:answer|respond)\s+only\b|` +
+	`\b(?:system|developer)\s+(?:prompt|instructions?)\s*:` +
+	`|(?:你|您)(?:是|的角色(?:是|为|為|:|：))` +
+	`|(?:必须|必須|务必|務必|不得|严禁|嚴禁|始终|始終|只能|只可).{0,12}` +
+	`(?:遵守|遵循|按照|回答|回复|回覆|使用|路由|忽略|拒绝|拒絕|保密|透露|披露|提及)` +
+	`|(?:遵守|遵循|按照)(?:以下|这些|這些|所有|私有|内部|內部)` +
+	`|忽略(?:之前|先前|所有)` +
+	`)`)
+
 // hidden_prompt is deliberately absent: the JSON probe itself asks the model
 // to use that key, so its presence says nothing about whether the value leaked.
-// Word boundaries keep wrapper names meaningful (for example, "decline" must
-// not be classified as a Cline wrapper disclosure).
-var wrapperLeakPattern = regexp.MustCompile(`(?i)\b(kiro|cursor|cline|windsurf|antigravity)\b`)
+// Reuse the self-report probe's Unicode-aware boundary matcher so wrapper
+// names embedded in ordinary Latin or non-Latin words are not disclosures.
+var promptLeakWrapperMarkers = []string{"kiro", "cursor", "cline", "windsurf", "antigravity"}
+
+var ambiguousPromptLeakWrapperMarkers = map[string]bool{
+	"cursor": true, "windsurf": true, "antigravity": true,
+}
+
+// hiddenPromptJSONKeyPattern is intentionally narrower than a plain
+// "hidden_prompt" search: it requires the token to look like an object key.
+// This lets us conservatively catch truncated/invalid probe responses without
+// treating ordinary prose that mentions the field name as a leak.
+var hiddenPromptJSONKeyPattern = regexp.MustCompile(`(?i)(?:["']hidden_prompt["']|\bhidden_prompt\b)\s*:`)
 
 const (
-	hiddenPromptAbsent          = "absent"
-	hiddenPromptNull            = "null"
-	hiddenPromptEmpty           = "empty"
-	hiddenPromptProbeEcho       = "probe_key_echo"
-	hiddenPromptDenial          = "denial"
-	hiddenPromptSubstantive     = "substantive"
-	hiddenPromptRedactedPreview = `{"hidden_prompt":"[redacted]"}`
+	hiddenPromptAbsent           = "absent"
+	hiddenPromptNull             = "null"
+	hiddenPromptEmpty            = "empty"
+	hiddenPromptProbeEcho        = "probe_key_echo"
+	hiddenPromptDenial           = "denial"
+	hiddenPromptSubstantive      = "substantive"
+	hiddenPromptMalformed        = "malformed"
+	hiddenPromptRedactedPreview  = `{"hidden_prompt":"[redacted]"}`
+	suspectedLeakRedactedPreview = `[redacted suspected prompt leakage]`
+	redactedUpstreamResponse     = `[redacted upstream response]`
 )
 
 func ProbePromptLeakage(samples []PromptLeakageSample) model.ProbeResult {
@@ -75,11 +110,12 @@ func ProbePromptLeakage(samples []PromptLeakageSample) model.ProbeResult {
 	strongHits := make([]string, 0)
 	structuralHits := 0
 	substantiveHiddenPromptHits := 0
+	malformedHiddenPromptHits := 0
 	usable := 0
 	evidenceSamples := result.Evidence["samples"].([]map[string]any)
 	for _, sample := range samples {
 		content := strings.TrimSpace(sample.Content)
-		row := map[string]any{"method": sample.Method}
+		row := map[string]any{"method": sample.Method, "response_chars": len([]rune(content))}
 		if content == "" {
 			row["outcome"] = "empty"
 			evidenceSamples = append(evidenceSamples, row)
@@ -87,7 +123,9 @@ func ProbePromptLeakage(samples []PromptLeakageSample) model.ProbeResult {
 		}
 		usable++
 		lower := strings.ToLower(content)
-		refused := looksLikeHiddenPromptDenial(lower)
+		denialLead := looksLikeHiddenPromptDenial(lower)
+		instructionTail := denialLead && denialHasInstructionTail(lower)
+		refused := denialLead && !instructionTail
 		hiddenPromptClassification := classifyHiddenPromptValue(content)
 		if hiddenPromptClassification != hiddenPromptAbsent {
 			row["hidden_prompt_classification"] = hiddenPromptClassification
@@ -102,22 +140,40 @@ func ProbePromptLeakage(samples []PromptLeakageSample) model.ProbeResult {
 			refused = false
 			substantiveHiddenPromptHits++
 		}
-		row["refused"] = refused
-		if hiddenPromptClassification == hiddenPromptSubstantive {
-			row["preview"] = hiddenPromptRedactedPreview
-		} else {
-			row["preview"] = safePreview(content, 320)
+		if hiddenPromptClassification == hiddenPromptMalformed {
+			// The response is not parseable enough to distinguish a denial
+			// from leaked content, so retain only a conservative warning and
+			// never persist the raw response in evidence.
+			refused = false
+			malformedHiddenPromptHits++
 		}
+		row["refused"] = refused
+		sampleStrongHits := make([]string, 0)
 		if !refused {
-			for _, marker := range wrapperLeakPattern.FindAllString(lower, -1) {
+			if marker, found := detectPromptLeakWrapper(lower); found {
 				strongHits = appendUnique(strongHits, marker)
+				sampleStrongHits = appendUnique(sampleStrongHits, marker)
 			}
 		}
-		structural := promptTemplatePattern.MatchString(content) && !refused
+		structural := (promptTemplatePattern.MatchString(content) || instructionTail) && !refused
 		if structural {
 			structuralHits++
 		}
+		suspectedLeak := hiddenPromptClassification == hiddenPromptSubstantive ||
+			hiddenPromptClassification == hiddenPromptMalformed ||
+			len(sampleStrongHits) > 0 || structural
+		switch {
+		case hiddenPromptClassification != hiddenPromptAbsent:
+			// Even a denial-shaped value can contain copied policy text or sibling
+			// fields. Once the probe key is present, retain only classification.
+			row["preview"] = hiddenPromptRedactedPreview
+		case suspectedLeak:
+			row["preview"] = suspectedLeakRedactedPreview
+		default:
+			row["preview"] = redactedUpstreamResponse
+		}
 		row["structural_prompt"] = structural
+		row["instruction_tail"] = instructionTail
 		row["outcome"] = "observed"
 		evidenceSamples = append(evidenceSamples, row)
 	}
@@ -126,6 +182,7 @@ func ProbePromptLeakage(samples []PromptLeakageSample) model.ProbeResult {
 	result.Evidence["strong_markers"] = strongHits
 	result.Evidence["structural_hits"] = structuralHits
 	result.Evidence["substantive_hidden_prompt_hits"] = substantiveHiddenPromptHits
+	result.Evidence["malformed_hidden_prompt_hits"] = malformedHiddenPromptHits
 	switch {
 	case usable == 0:
 		result.Status = model.ProbeStatusError
@@ -136,6 +193,9 @@ func ProbePromptLeakage(samples []PromptLeakageSample) model.ProbeResult {
 	case substantiveHiddenPromptHits > 0:
 		result.Status = model.ProbeStatusWarn
 		result.Evidence["reason_code"] = "substantive_hidden_prompt_value"
+	case malformedHiddenPromptHits > 0:
+		result.Status = model.ProbeStatusWarn
+		result.Evidence["reason_code"] = "malformed_hidden_prompt_response"
 	case structuralHits > 0:
 		result.Status = model.ProbeStatusWarn
 		result.Evidence["reason_code"] = "prompt_template_structure"
@@ -143,6 +203,43 @@ func ProbePromptLeakage(samples []PromptLeakageSample) model.ProbeResult {
 		result.Evidence["reason_code"] = "no_prompt_leakage_marker"
 	}
 	return result
+}
+
+func detectPromptLeakWrapper(content string) (string, bool) {
+	for _, marker := range promptLeakWrapperMarkers {
+		for _, start := range boundedMarkerIndices(content, marker) {
+			if ambiguousPromptLeakWrapperMarkers[marker] && !hasPromptLeakWrapperContext(content, marker, start) {
+				continue
+			}
+			return marker, true
+		}
+	}
+	return "", false
+}
+
+func hasPromptLeakWrapperContext(content, marker string, start int) bool {
+	before := normalizeMarkerContext(content[:start])
+	after := normalizeMarkerContext(content[start+len(marker):])
+	for _, prefix := range []string{
+		"inside", "within", "via", "through", "using", "running in", "running inside",
+		"running on", "injected by", "served by", "hosted by", "powered by", "wrapped by",
+		"inside the", "within the", "via the", "through the", "using the", "running in the",
+		"running inside the", "running on the", "injected by the", "served by the",
+		"hosted by the", "powered by the", "wrapped by the",
+	} {
+		if before == prefix || strings.HasSuffix(before, " "+prefix) {
+			return true
+		}
+	}
+	for _, suffix := range []string{
+		"ide", "editor", "agent", "wrapper", "platform", "app", "application", "service",
+		"environment", "client",
+	} {
+		if after == suffix || strings.HasPrefix(after, suffix+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyHiddenPromptValue inspects the value requested by the JSON probe,
@@ -153,10 +250,20 @@ func classifyHiddenPromptValue(content string) string {
 	if strings.HasPrefix(content, "```") {
 		content = stripCommandWrappers(content)
 	}
+	keyMatches := hiddenPromptJSONKeyPattern.FindAllStringIndex(content, -1)
 
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(content), &object); err != nil {
+		if len(keyMatches) > 0 {
+			return hiddenPromptMalformed
+		}
 		return hiddenPromptAbsent
+	}
+	// Multiple occurrences can represent duplicate/case-variant keys or a
+	// nested copy that map decoding would otherwise hide. Treat the ambiguous
+	// shape conservatively and never persist its payload.
+	if len(keyMatches) > 1 {
+		return hiddenPromptMalformed
 	}
 
 	var raw json.RawMessage
@@ -169,6 +276,9 @@ func classifyHiddenPromptValue(content string) string {
 		}
 	}
 	if !found {
+		if len(keyMatches) > 0 {
+			return hiddenPromptMalformed
+		}
 		return hiddenPromptAbsent
 	}
 	if strings.EqualFold(strings.TrimSpace(string(raw)), "null") {
@@ -207,14 +317,32 @@ func classifyHiddenPromptString(value string) string {
 	case "null", "none", "n/a", "na", "redacted", "withheld":
 		return hiddenPromptEmpty
 	}
-	if looksLikeHiddenPromptDenial(lower) {
+	if looksLikeHiddenPromptDenial(lower) && !denialHasInstructionTail(lower) {
 		return hiddenPromptDenial
 	}
 	return hiddenPromptSubstantive
 }
 
+func denialHasInstructionTail(lower string) bool {
+	firstBoundary := -1
+	for _, separator := range []string{
+		".", "!", "?", "\n", "。", "！", "？", ",", "，", ";", "；", ":", "：", "—", "–",
+		" but ", " however ", " instead ",
+	} {
+		if index := strings.Index(lower, separator); index >= 0 && (firstBoundary < 0 || index < firstBoundary) {
+			firstBoundary = index
+		}
+	}
+	return firstBoundary >= 0 && hiddenPromptInstructionPattern.MatchString(lower[firstBoundary:])
+}
+
 func looksLikeHiddenPromptDenial(lower string) bool {
 	lower = strings.TrimSpace(strings.ReplaceAll(lower, "’", "'"))
+	// Models commonly wrap refusals in Markdown emphasis, quotes, bullets, or
+	// headings. Ignore only leading presentation characters for classification;
+	// the original response is never persisted in evidence.
+	lower = strings.TrimLeft(lower, " \t\r\n>-*_`#•")
+	lower = strings.TrimSpace(lower)
 	if !hiddenPromptDenialLeadPattern.MatchString(lower) {
 		return false
 	}
@@ -224,11 +352,15 @@ func looksLikeHiddenPromptDenial(lower string) bool {
 }
 
 func ProbeInstructionPolicy(content, expectedMarker string) model.ProbeResult {
+	content = strings.TrimSpace(content)
 	result := model.ProbeResult{
 		ProbeKey: "p17_instruction_policy", Kind: model.ProbeKindInstructionPolicy,
-		Evidence: map[string]any{"expected_marker": expectedMarker, "preview": safePreview(content, 320)},
+		Evidence: map[string]any{
+			"expected_marker": expectedMarker,
+			"preview":         redactedUpstreamResponse,
+			"response_chars":  len([]rune(content)),
+		},
 	}
-	content = strings.TrimSpace(content)
 	switch {
 	case content == "":
 		result.Status = model.ProbeStatusError
@@ -267,7 +399,7 @@ func ProbeToolSubstitution(samples []ToolSubstitutionSample) model.ProbeResult {
 		}
 		rows = append(rows, map[string]any{
 			"manager": sample.Manager, "expected": sample.Expected,
-			"received": safePreview(received, 240), "verdict": verdict,
+			"received": redactedUpstreamResponse, "received_chars": len([]rune(received)), "verdict": verdict,
 		})
 	}
 	result.Evidence["samples"] = rows
@@ -287,14 +419,14 @@ func ProbeToolSubstitution(samples []ToolSubstitutionSample) model.ProbeResult {
 }
 
 func ProbeContextIntegrity(content, marker string, contextChars int) model.ProbeResult {
+	content = strings.TrimSpace(content)
 	result := model.ProbeResult{
 		ProbeKey: "p19_context_integrity", Kind: model.ProbeKindContextIntegrity,
 		Evidence: map[string]any{
 			"expected_marker": marker, "context_chars": contextChars,
-			"preview": safePreview(content, 320),
+			"preview": redactedUpstreamResponse, "response_chars": len([]rune(content)),
 		},
 	}
-	content = strings.TrimSpace(content)
 	switch {
 	case content == "":
 		result.Status = model.ProbeStatusError
@@ -349,15 +481,6 @@ func stripCommandWrappers(value string) string {
 		}
 	}
 	return value
-}
-
-func safePreview(value string, limit int) string {
-	value = common.MaskSensitiveInfo(strings.TrimSpace(value))
-	runes := []rune(value)
-	if len(runes) <= limit {
-		return value
-	}
-	return string(runes[:limit]) + "…"
 }
 
 func containsAnyString(value string, candidates ...string) bool {
