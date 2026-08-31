@@ -212,6 +212,22 @@ func TestProbeIdentity_FamilyMatch(t *testing.T) {
 	// claude family with version suffix
 	r = ProbeIdentity(spec, IdentityObs{RequestedModel: "claude-opus-4-8", UpstreamModel: "claude-opus-4-8-20260101"})
 	assert.Equal(t, model.ProbeStatusPass, r.Status)
+
+}
+
+func TestQuality_BedrockIdentityQualifierIsRoutingNotFamily(t *testing.T) {
+	spec := model.ProbeSpec{}
+	r := ProbeIdentity(spec, IdentityObs{
+		RequestedModel: "claude-haiku-4-5-20251001",
+		UpstreamModel:  "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+	})
+	assert.Equal(t, model.ProbeStatusPass, r.Status)
+
+	r = ProbeIdentity(spec, IdentityObs{
+		RequestedModel: "claude-haiku-4-5-20251001",
+		UpstreamModel:  "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+	})
+	assert.Equal(t, model.ProbeStatusFail, r.Status)
 }
 
 func TestProbeCostAnchor(t *testing.T) {

@@ -475,6 +475,15 @@ var dateMarker = regexp.MustCompile(`-20\d{2}`)
 func modelFamily(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
 	n = strings.ReplaceAll(n, "_", "-")
+	// Bedrock inference profiles qualify Anthropic model IDs with a region and
+	// provider (for example, "global.anthropic.claude-haiku-4-5-...").  The
+	// qualifier describes routing, not a different model family.
+	if i := strings.Index(n, "anthropic."); i >= 0 {
+		candidate := n[i+len("anthropic."):]
+		if strings.HasPrefix(candidate, "claude-") {
+			n = candidate
+		}
+	}
 	if loc := dateMarker.FindStringIndex(n); loc != nil && loc[0] > 0 {
 		n = n[:loc[0]]
 	}

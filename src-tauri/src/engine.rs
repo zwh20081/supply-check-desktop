@@ -740,10 +740,20 @@ fn vendor_markers(vendor: &str) -> &'static [&'static str] {
 }
 
 fn normalize_model(model: &str) -> String {
-    model
+    let normalized = model
         .trim()
         .trim_start_matches("models/")
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+
+    // Bedrock inference profiles add routing/provider qualifiers to the model
+    // ID. They do not indicate a different underlying Claude family.
+    if let Some((_, candidate)) = normalized.split_once("anthropic.") {
+        if candidate.starts_with("claude-") {
+            return candidate.to_string();
+        }
+    }
+
+    normalized
 }
 
 fn model_family(model: &str) -> String {
@@ -823,6 +833,10 @@ mod tests {
         assert!(same_model_family(
             "claude-sonnet-4-5",
             "claude-sonnet-4-5-20250929"
+        ));
+        assert!(same_model_family(
+            "claude-haiku-4-5-20251001",
+            "global.anthropic.claude-haiku-4-5-20251001-v1:0"
         ));
         assert!(!same_model_family("gpt-5", "claude-sonnet-4-5"));
     }
