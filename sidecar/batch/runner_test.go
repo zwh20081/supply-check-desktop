@@ -31,8 +31,26 @@ func TestCompleteSuiteContract(t *testing.T) {
 	if got := len(definitions()); got != 22 {
 		t.Fatalf("complete suite should expose 22 results, got %d", got)
 	}
-	if RequestsPerModel != 63 {
+	if RequestsPerModel != 60 {
 		t.Fatalf("complete suite request estimate changed: %d", RequestsPerModel)
+	}
+}
+
+func TestCacheRateContextLengthsAreUniformThrough250K(t *testing.T) {
+	lengths := evenlySpacedContextLengths(cacheRateVariants, cacheRateMinContextChars, cacheRateMaxContextChars)
+	if len(lengths) != 10 {
+		t.Fatalf("expected 10 context lengths, got %d", len(lengths))
+	}
+	if lengths[0] != 16_000 || lengths[len(lengths)-1] != 250_000 {
+		t.Fatalf("unexpected context range: %v", lengths)
+	}
+	for index := 1; index < len(lengths); index++ {
+		if delta := lengths[index] - lengths[index-1]; delta != 26_000 {
+			t.Fatalf("context lengths are not uniform at index %d: delta=%d lengths=%v", index, delta, lengths)
+		}
+	}
+	if got := cacheRateVariants * (cacheRateWarmLoops + 1); got != 30 {
+		t.Fatalf("cache-rate request budget changed: %d", got)
 	}
 }
 

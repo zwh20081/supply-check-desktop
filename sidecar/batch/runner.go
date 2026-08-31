@@ -23,7 +23,14 @@ import (
 	"supply-check-sdk/providers"
 )
 
-const RequestsPerModel = 63
+const (
+	baseRequestsPerModel     = 30
+	cacheRateVariants        = 10
+	cacheRateWarmLoops       = 2
+	cacheRateMinContextChars = 16_000
+	cacheRateMaxContextChars = 250_000
+	RequestsPerModel         = baseRequestsPerModel + cacheRateVariants*(cacheRateWarmLoops+1)
+)
 
 type Progress struct {
 	Kind              string `json:"kind"`
@@ -331,17 +338,24 @@ func (r *runner) runCacheABC(ctx context.Context, state *modelState, totalModels
 }
 
 func (r *runner) runCacheRate(ctx context.Context, state *modelState, totalModels int) model.ProbeResult {
-	const variants, loops, contextChars = 3, 10, 16000
+	const variants, loops = cacheRateVariants, cacheRateWarmLoops
+	contextLengths := evenlySpacedContextLengths(variants, cacheRateMinContextChars, cacheRateMaxContextChars)
 	seed := fmt.Sprintf("%d:%s", time.Now().UnixNano(), state.model)
-	type promptDef struct{ id, prompt, marker string }
+	type promptDef struct {
+		id, prompt, marker string
+		contextChars       int
+	}
 	prompts := make([]promptDef, 0, variants)
-	for index := 0; index < variants; index++ {
+	for index, contextChars := range contextLengths {
 		id := string(rune('A' + index))
 		digest := sha256.Sum256([]byte(seed + ":" + id))
 		marker := fmt.Sprintf("CACHE-RATE-%s-%x", id, digest[:8])
 		unit := fmt.Sprintf("cache-rate rotation %s immutable context %x; verify long-context prefix reuse; ", id, digest[:6])
 		longContext := strings.Repeat(unit, contextChars/len(unit)+1)[:contextChars]
-		prompts = append(prompts, promptDef{id, longContext + "\nReturn exactly " + marker, marker})
+		prompts = append(prompts, promptDef{
+			id: id, prompt: longContext + "\nReturn exactly " + marker,
+			marker: marker, contextChars: contextChars,
+		})
 	}
 	type phase struct {
 		role   string
@@ -362,7 +376,10 @@ func (r *runner) runCacheRate(ctx context.Context, state *modelState, totalModel
 		mode, key := cacheRateControl(r.credentials.Provider, "rate-"+state.model, phase.prompt.id)
 		observation, err := r.execute(ctx, state, totalModels, "cache_rate", protocol.Request{Prompt: phase.prompt.prompt, MaxTokens: 24, CacheMode: mode, CacheKey: key})
 		if err != nil {
-			samples = append(samples, pricetest.CacheRateSample{PromptID: phase.prompt.id, Role: phase.role, Round: phase.round, ContextChars: contextChars, Errored: true})
+			samples = append(samples, pricetest.CacheRateSample{
+				PromptID: phase.prompt.id, Role: phase.role, Round: phase.round,
+				ContextChars: phase.prompt.contextChars, Errored: true,
+			})
 			continue
 		}
 		first := int64(observation.FirstChunkMs)
@@ -378,13 +395,28 @@ func (r *runner) runCacheRate(ctx context.Context, state *modelState, totalModel
 			}
 		}
 		samples = append(samples, pricetest.CacheRateSample{
-			PromptID: phase.prompt.id, Role: phase.role, Round: phase.round, ContextChars: contextChars,
+			PromptID: phase.prompt.id, Role: phase.role, Round: phase.round, ContextChars: phase.prompt.contextChars,
 			PromptTokens: int(observation.PromptTokens), CachedTokens: int(observation.CachedTokens), CacheCreationTokens: int(observation.CacheCreationTokens),
 			CacheTokensSeparate: r.credentials.Provider == "anthropic", TelemetryReported: observation.CacheTelemetryReported,
 			FirstResponseMs: first, ObservedPromptID: observedPromptID, MarkerMatch: observedPromptID == phase.prompt.id,
 		})
 	}
-	return pricetest.ProbeCacheRate(samples, variants, loops, contextChars)
+	return pricetest.ProbeCacheRate(samples, variants, loops, cacheRateMaxContextChars)
+}
+
+func evenlySpacedContextLengths(count, minimum, maximum int) []int {
+	if count <= 0 || minimum <= 0 || maximum < minimum {
+		return nil
+	}
+	if count == 1 {
+		return []int{maximum}
+	}
+	lengths := make([]int, count)
+	span := maximum - minimum
+	for index := range lengths {
+		lengths[index] = minimum + index*span/(count-1)
+	}
+	return lengths
 }
 
 func (r *runner) runPurity(ctx context.Context, state *modelState, totalModels int) model.ProbeResult {

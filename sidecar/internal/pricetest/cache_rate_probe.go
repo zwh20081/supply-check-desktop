@@ -2,6 +2,7 @@ package pricetest
 
 import (
 	"math"
+	"sort"
 
 	"supply-check-sdk/internal/model"
 )
@@ -45,13 +46,19 @@ func ProbeCacheRate(samples []CacheRateSample, expectedVariants, warmLoops, cont
 	if warmLoops <= 0 {
 		warmLoops = 1
 	}
+	contextLengths := cacheRateContextLengths(samples)
 	result := model.ProbeResult{
 		ProbeKey: "p21_cache_rate", Kind: model.ProbeKindCacheRate,
 		Evidence: map[string]any{
 			"prompt_variants": expectedVariants,
 			"context_chars":   contextChars,
+			"context_lengths": contextLengths,
 			"samples":         cacheRateSampleEvidence(samples),
 		},
+	}
+	if len(contextLengths) > 0 {
+		result.Evidence["min_context_chars"] = contextLengths[0]
+		result.Evidence["max_context_chars"] = contextLengths[len(contextLengths)-1]
 	}
 	expectedWarmSamples := expectedVariants * warmLoops
 	expectedSamples := expectedVariants + expectedWarmSamples
@@ -210,6 +217,21 @@ func ProbeCacheRate(samples []CacheRateSample, expectedVariants, warmLoops, cont
 		result.Evidence["reason_code"] = "cache_rate_measured"
 	}
 	return result
+}
+
+func cacheRateContextLengths(samples []CacheRateSample) []int {
+	unique := make(map[int]struct{})
+	for _, sample := range samples {
+		if sample.ContextChars > 0 {
+			unique[sample.ContextChars] = struct{}{}
+		}
+	}
+	lengths := make([]int, 0, len(unique))
+	for length := range unique {
+		lengths = append(lengths, length)
+	}
+	sort.Ints(lengths)
+	return lengths
 }
 
 func cacheRateSampleEvidence(samples []CacheRateSample) []map[string]any {

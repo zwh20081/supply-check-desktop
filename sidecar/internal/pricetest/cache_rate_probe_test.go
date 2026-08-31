@@ -24,6 +24,20 @@ func TestProbeCacheRateMeasuresRotatedWarmPrompts(t *testing.T) {
 	require.EqualValues(t, 200, result.LatencyMs)
 }
 
+func TestQuality_CacheRateEvidencePreservesDistributedContextLengths(t *testing.T) {
+	samples := []CacheRateSample{
+		{PromptID: "J", Role: "cold", ContextChars: 250_000, Errored: true},
+		{PromptID: "A", Role: "cold", ContextChars: 16_000, Errored: true},
+		{PromptID: "F", Role: "warm", ContextChars: 146_000, Errored: true},
+		{PromptID: "A", Role: "warm", ContextChars: 16_000, Errored: true},
+	}
+
+	result := ProbeCacheRate(samples, 10, 2, 250_000)
+	require.Equal(t, []int{16_000, 146_000, 250_000}, result.Evidence["context_lengths"])
+	require.Equal(t, 16_000, result.Evidence["min_context_chars"])
+	require.Equal(t, 250_000, result.Evidence["max_context_chars"])
+}
+
 func TestProbeCacheRateUsesAnthropicTotalInputDenominator(t *testing.T) {
 	samples := []CacheRateSample{
 		{PromptID: "A", Role: "cold", PromptTokens: 1, CacheCreationTokens: 4000, CacheTokensSeparate: true, TelemetryReported: true, MarkerMatch: true},
