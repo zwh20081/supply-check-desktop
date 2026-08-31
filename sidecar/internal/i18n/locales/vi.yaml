@@ -32,7 +32,7 @@ healthcheck.report.chart.coverage_summary: "{{.Targets}} mục tiêu với {{.Pr
 healthcheck.report.summary_line: "Kết luận: {{.Verdict}}    Điểm tin cậy: {{.Score}}/100    Chi phí thượng nguồn: {{.Cost}}"
 healthcheck.report.cache_rate.title: "TỶ LỆ BỘ NHỚ ĐỆM TỔNG (NGỮ CẢNH DÀI)"
 healthcheck.report.cache_rate.single_summary: "{{.Loops}} vòng lặp nóng trúng {{.Hits}}/{{.Prompts}} mẫu; đã đệm {{.Cached}}/{{.Tokens}} token"
-healthcheck.report.cache_rate.batch_summary: "{{.Covered}}/{{.Targets}} mục tiêu báo cáo dữ liệu bộ nhớ đệm; đã đệm {{.Cached}}/{{.Tokens}} token"
+healthcheck.report.cache_rate.batch_summary: "Đã tính tỷ lệ đệm cho {{.Covered}}/{{.Targets}} mục tiêu; có dữ liệu token đệm cho {{.Telemetry}}/{{.Targets}}; mẫu nóng hợp lệ đã đệm {{.Cached}}/{{.Tokens}} token"
 healthcheck.report.cache_rate.per_target_title: "Tỷ lệ bộ nhớ đệm theo mục tiêu"
 healthcheck.report.cache_rate.field.prompt: "Lời nhắc"
 healthcheck.report.cache_rate.field.phase: "Giai đoạn"

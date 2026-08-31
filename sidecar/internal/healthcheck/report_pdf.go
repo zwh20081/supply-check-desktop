@@ -2,6 +2,7 @@ package healthcheck
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -224,23 +225,32 @@ func (r *pdfReport) drawMetadataCell(x, y, width, height float64, field reportFi
 }
 
 func (r *pdfReport) addSection(title string) {
+	const (
+		topGap           = 20.0
+		lineHeight       = 21.0
+		bottomGap        = 8.0
+		followingReserve = 82.0
+	)
 	lines := wrapPDFText(title, reportPDFContentWidth, 16)
-	height := float64(len(lines))*21 + 13
-	r.ensure(height)
-	r.y -= 8
+	height := topGap + float64(len(lines))*lineHeight + bottomGap
+	// Keep both clear space above the heading and enough room below it for the
+	// first meaningful row/callout. Besides avoiding collisions, this prevents
+	// section headings from being orphaned at the bottom of a page.
+	r.ensure(height + followingReserve)
+	r.y -= topGap
 	for _, line := range lines {
 		r.drawText(reportPDFMargin, r.y, 16, line, colorBlue, true)
-		r.y -= 21
+		r.y -= lineHeight
 	}
 	r.drawLine(reportPDFMargin, r.y+7, reportPDFWidth-reportPDFMargin, r.y+7, colorBorder, 0.7)
-	r.y -= 5
+	r.y -= bottomGap
 }
 
 func (r *pdfReport) addVerdictCallout(verdict string, score, cost int) {
 	text := trReport(r.lang, i18n.MsgHealthCheckReportSummaryLine, map[string]any{
 		"Verdict": verdict,
 		"Score":   score,
-		"Cost":    cost,
+		"Cost":    reportCostDisplay(cost),
 	})
 	lines := wrapPDFText(text, reportPDFContentWidth-32, 12)
 	height := 24 + float64(len(lines))*17
@@ -263,6 +273,7 @@ type reportCacheRate struct {
 	cachedTokens int
 	promptTokens int
 	items        []reportCacheRateItem
+	telemetry    bool
 	available    bool
 }
 
@@ -276,6 +287,14 @@ type reportCacheRateItem struct {
 type reportTargetCacheRate struct {
 	label  string
 	metric reportCacheRate
+}
+
+type reportBatchCacheRate struct {
+	validTargets     int
+	telemetryTargets int
+	cachedTokens     int
+	promptTokens     int
+	targets          []reportTargetCacheRate
 }
 
 func cacheRateFromResults(results model.ProbeResultList) reportCacheRate {
@@ -326,7 +345,8 @@ func cacheRateFromResults(results model.ProbeResultList) reportCacheRate {
 		for index := range metric.items {
 			metric.items[index].rate = percentReport(metric.items[index].cachedTokens, metric.items[index].totalTokens)
 		}
-		metric.available = int(evidenceNumber(result.Evidence["reported_warm_samples"])) > 0
+		metric.telemetry = int(evidenceNumber(result.Evidence["reported_warm_samples"])) > 0
+		metric.available = metric.telemetry && metric.promptTokens > 0
 		return metric
 	}
 	return reportCacheRate{}
@@ -375,54 +395,92 @@ func (r *pdfReport) addCacheRateCallout(results model.ProbeResultList) {
 }
 
 func (r *pdfReport) addBatchCacheRateCallout(tasks []*model.HealthCheckTask, runs map[int]*model.ProbeRun) {
-	covered, cachedTokens, promptTokens := 0, 0, 0
-	targetMetrics := make([]reportTargetCacheRate, 0, len(tasks))
+	metric := batchCacheRateFromRuns(tasks, runs)
+	if metric.validTargets == 0 || metric.promptTokens <= 0 {
+		return
+	}
+	rate := float64(metric.cachedTokens) / float64(metric.promptTokens) * 100
+	summary := trReport(r.lang, i18n.MsgHealthCheckReportCacheRateBatchSummary, map[string]any{
+		"Covered": metric.validTargets, "Telemetry": metric.telemetryTargets, "Targets": len(tasks),
+		"Cached": metric.cachedTokens, "Tokens": metric.promptTokens,
+	})
+	r.drawCacheRateCallout(rate, summary, nil)
+	r.addBatchCacheRateTable(metric.targets)
+}
+
+func batchCacheRateFromRuns(tasks []*model.HealthCheckTask, runs map[int]*model.ProbeRun) reportBatchCacheRate {
+	metric := reportBatchCacheRate{targets: make([]reportTargetCacheRate, 0, len(tasks))}
 	for _, task := range tasks {
 		run := runs[task.ProbeRunID]
 		if run == nil {
 			continue
 		}
-		metric := cacheRateFromResults(run.Results)
-		if !metric.available {
+		if hasCacheTelemetry(run.Results) {
+			metric.telemetryTargets++
+		}
+		targetMetric := cacheRateFromResults(run.Results)
+		if !targetMetric.available {
 			continue
 		}
-		covered++
-		cachedTokens += metric.cachedTokens
-		promptTokens += metric.promptTokens
-		targetMetrics = append(targetMetrics, reportTargetCacheRate{
-			label: task.Model, metric: metric,
+		metric.validTargets++
+		metric.cachedTokens += targetMetric.cachedTokens
+		metric.promptTokens += targetMetric.promptTokens
+		metric.targets = append(metric.targets, reportTargetCacheRate{
+			label: task.Model, metric: targetMetric,
 		})
 	}
-	if covered == 0 || promptTokens <= 0 {
-		return
-	}
-	rate := float64(cachedTokens) / float64(promptTokens) * 100
-	summary := trReport(r.lang, i18n.MsgHealthCheckReportCacheRateBatchSummary, map[string]any{
-		"Covered": covered, "Targets": len(tasks), "Cached": cachedTokens, "Tokens": promptTokens,
-	})
-	r.drawCacheRateCallout(rate, summary, nil)
-	r.addBatchCacheRateTable(targetMetrics)
+	return metric
 }
 
 func (r *pdfReport) drawCacheRateCallout(rate float64, summary string, items []reportCacheRateItem) {
+	const (
+		titleXOffset    = 18.0
+		rightXOffset    = 175.0
+		titleBaseline   = 20.0
+		titleLineHeight = 13.0
+		bodyLineHeight  = 13.0
+		itemLineHeight  = 13.0
+	)
+	titleLines := wrapPDFText(
+		trReport(r.lang, i18n.MsgHealthCheckReportCacheRateTitle),
+		reportPDFContentWidth-2*titleXOffset,
+		10,
+	)
+	rightWidth := reportPDFContentWidth - rightXOffset - 18
+	summaryLines := wrapPDFText(summary, rightWidth, 9.5)
 	itemCount := min(len(items), 5)
-	height := max(82.0, 56.0+float64(itemCount)*13.0)
+	itemLines := make([][]string, 0, itemCount)
+	itemLineCount := 0
+	for _, item := range items[:itemCount] {
+		label := fmt.Sprintf("%s   %.2f%%   %d/%d token", item.label, item.rate, item.cachedTokens, item.totalTokens)
+		lines := wrapPDFText(label, rightWidth, 10.5)
+		itemLines = append(itemLines, lines)
+		itemLineCount += len(lines)
+	}
+	bodyBaseline := titleBaseline + float64(len(titleLines))*titleLineHeight + 10
+	itemsBaseline := bodyBaseline + float64(len(summaryLines))*bodyLineHeight + 7
+	bodyBottom := max(bodyBaseline+38, itemsBaseline+float64(itemLineCount)*itemLineHeight)
+	height := max(92.0, bodyBottom+14)
 	r.ensure(height + 10)
 	r.drawRect(reportPDFMargin, r.y-height, reportPDFContentWidth, height, pdfColor{0.925, 0.980, 0.950}, true)
 	r.drawRect(reportPDFMargin, r.y-height, 5, height, colorPass, true)
-	r.drawText(reportPDFMargin+18, r.y-18, 10, trReport(r.lang, i18n.MsgHealthCheckReportCacheRateTitle), colorMuted, true)
-	r.drawText(reportPDFMargin+18, r.y-54, 31, fmt.Sprintf("%.2f%%", rate), colorPass, true)
-	lines := wrapPDFText(summary, reportPDFContentWidth-170, 9.5)
-	ty := r.y - 20
-	for _, line := range lines[:min(len(lines), 2)] {
-		r.drawText(reportPDFMargin+165, ty, 9.5, line, colorText, false)
-		ty -= 13
+	ty := r.y - titleBaseline
+	for _, line := range titleLines {
+		r.drawText(reportPDFMargin+titleXOffset, ty, 10, line, colorMuted, true)
+		ty -= titleLineHeight
 	}
-	itemY := r.y - 48
-	for _, item := range items[:itemCount] {
-		label := fmt.Sprintf("%s   %.2f%%   %d/%d token", item.label, item.rate, item.cachedTokens, item.totalTokens)
-		r.drawText(reportPDFMargin+165, itemY, 10.5, label, colorNavy, true)
-		itemY -= 13
+	r.drawText(reportPDFMargin+titleXOffset, r.y-bodyBaseline-20, 31, fmt.Sprintf("%.2f%%", rate), colorPass, true)
+	ty = r.y - bodyBaseline
+	for _, line := range summaryLines {
+		r.drawText(reportPDFMargin+rightXOffset, ty, 9.5, line, colorText, false)
+		ty -= bodyLineHeight
+	}
+	itemY := r.y - itemsBaseline
+	for _, lines := range itemLines {
+		for _, line := range lines {
+			r.drawText(reportPDFMargin+rightXOffset, itemY, 10.5, line, colorNavy, true)
+			itemY -= itemLineHeight
+		}
 	}
 	r.y -= height + 10
 }
@@ -431,7 +489,11 @@ func (r *pdfReport) addBatchCacheRateTable(targets []reportTargetCacheRate) {
 	if len(targets) == 0 {
 		return
 	}
-	r.ensure(34)
+	const topGap = 18.0
+	// Reserve the title and at least the table header so the subheading cannot
+	// touch the callout above it or become detached from its table.
+	r.ensure(topGap + 52)
+	r.y -= topGap
 	r.drawText(reportPDFMargin, r.y, 12, trReport(r.lang, i18n.MsgHealthCheckReportCacheRatePerTargetTitle), colorNavy, true)
 	r.y -= 18
 	headers := []string{
@@ -459,7 +521,7 @@ func (r *pdfReport) addJobSummary(job *model.HealthCheckJob) {
 		{trReport(r.lang, i18n.MsgHealthCheckReportFieldProgress), fmt.Sprintf("%d/%d", job.CompletedTasks+job.FailedTasks, job.TotalTasks)},
 		{trReport(r.lang, i18n.MsgHealthCheckReportFieldVerdict), localizedVerdict(r.lang, job.Verdict)},
 		{trReport(r.lang, i18n.MsgHealthCheckReportFieldTrustScore), scoreDisplay(job.Verdict, job.TrustScore)},
-		{trReport(r.lang, i18n.MsgHealthCheckReportFieldUpstreamCost), strconv.Itoa(job.UpstreamCost)},
+		{trReport(r.lang, i18n.MsgHealthCheckReportFieldUpstreamCost), reportCostDisplay(job.UpstreamCost)},
 	}
 	r.addTable(nil, rows, []float64{150, reportPDFContentWidth - 150}, []bool{true, false})
 }
@@ -484,7 +546,7 @@ func (r *pdfReport) addTaskTable(tasks []*model.HealthCheckTask, runs map[int]*m
 			channelDisplay(task.ChannelID, task.ChannelName), task.Model,
 			localizedJobStatus(r.lang, task.Status), localizedVerdict(r.lang, task.Verdict),
 			scoreDisplay(task.Verdict, task.TrustScore),
-			strconv.Itoa(task.UpstreamCost), strconv.Itoa(probeCount),
+			reportCostDisplay(task.UpstreamCost), strconv.Itoa(probeCount),
 		})
 	}
 	r.addTable(headers, rows, []float64{82, 112, 66, 72, 58, 55, 50}, nil)
@@ -742,11 +804,8 @@ func (r *pdfReport) addEvidence(results model.ProbeResultList) {
 	}
 	r.addSection(trReport(r.lang, i18n.MsgHealthCheckReportSectionEvidence))
 	for _, result := range results {
-		r.ensure(40)
 		name := localizedProbeKind(r.lang, result.Kind)
-		r.drawText(reportPDFMargin, r.y, 11.5, name, colorNavy, true)
-		r.drawText(reportPDFWidth-reportPDFMargin-92, r.y, 9, localizedProbeStatus(r.lang, result.Status), colorMuted, true)
-		r.y -= 16
+		r.addEvidenceHeading(name, localizedProbeStatus(r.lang, result.Status))
 		renderedSamples := false
 		if result.Kind == model.ProbeKindCacheRate || result.Kind == model.ProbeKindCacheAccounting {
 			renderedSamples = r.addCacheRateSampleTable(result.Evidence["samples"])
@@ -769,8 +828,29 @@ func (r *pdfReport) addEvidence(results model.ProbeResultList) {
 			}
 			r.addEvidenceField(key, value)
 		}
-		r.y -= 8
 	}
+}
+
+func (r *pdfReport) addEvidenceHeading(name, status string) {
+	const (
+		topGap           = 18.0
+		lineHeight       = 15.0
+		bottomGap        = 6.0
+		followingReserve = 28.0
+		statusColumn     = 130.0
+	)
+	nameLines := wrapPDFText(name, reportPDFContentWidth-statusColumn, 11.5)
+	height := topGap + float64(len(nameLines))*lineHeight + bottomGap
+	r.ensure(height + followingReserve)
+	r.y -= topGap
+	ty := r.y
+	for _, line := range nameLines {
+		r.drawText(reportPDFMargin, ty, 11.5, line, colorNavy, true)
+		ty -= lineHeight
+	}
+	statusX := reportPDFWidth - reportPDFMargin - pdfTextWidth(status, 9)
+	r.drawText(statusX, r.y, 9, status, colorMuted, true)
+	r.y -= float64(len(nameLines))*lineHeight + bottomGap
 }
 
 func (r *pdfReport) addCacheRateSampleTable(raw any) bool {
@@ -1045,26 +1125,44 @@ func wrapPDFText(text string, width, fontSize float64) []string {
 			lines = append(lines, "")
 			continue
 		}
-		var line strings.Builder
-		lineWidth := 0.0
+		line := make([]rune, 0, len(paragraph))
 		for _, character := range paragraph {
-			charWidth := pdfRuneWidth(character) * fontSize
-			if line.Len() > 0 && lineWidth+charWidth > width {
-				lines = append(lines, strings.TrimSpace(line.String()))
-				line.Reset()
-				lineWidth = 0
+			line = append(line, character)
+			for len(line) > 1 && pdfTextWidth(string(line), fontSize) > width {
+				cut := lastPDFWrapOpportunity(line[:len(line)-1])
+				if cut < 0 {
+					cut = len(line) - 2
+				}
+				includeBreak := line[cut] != ' ' && line[cut] != '\t'
+				emitEnd := cut
+				if includeBreak {
+					emitEnd++
+				}
+				emitted := strings.TrimRight(string(line[:emitEnd]), " \t")
+				if emitted != "" {
+					lines = append(lines, emitted)
+				}
+				line = []rune(strings.TrimLeft(string(line[cut+1:]), " \t"))
 			}
-			line.WriteRune(character)
-			lineWidth += charWidth
 		}
-		if line.Len() > 0 {
-			lines = append(lines, strings.TrimSpace(line.String()))
+		if len(line) > 0 {
+			lines = append(lines, strings.TrimRight(string(line), " \t"))
 		}
 	}
 	if len(lines) == 0 {
 		return []string{""}
 	}
 	return lines
+}
+
+func lastPDFWrapOpportunity(line []rune) int {
+	for index := len(line) - 1; index >= 0; index-- {
+		switch line[index] {
+		case ' ', '\t', '_', '-', '/', ',', ';', ':':
+			return index
+		}
+	}
+	return -1
 }
 
 func pdfRuneWidth(r rune) float64 {
@@ -1208,28 +1306,46 @@ func evidenceValue(value any) string {
 		return strconv.Itoa(v)
 	case int64:
 		return strconv.FormatInt(v, 10)
-	case []string:
-		return strings.Join(v, ", ")
-	case []any:
-		parts := make([]string, 0, len(v))
-		for _, item := range v {
-			parts = append(parts, evidenceValue(item))
-		}
-		return strings.Join(parts, ", ")
-	case map[string]any:
-		keys := make([]string, 0, len(v))
-		for key := range v {
-			keys = append(keys, key)
-		}
-		slices.Sort(keys)
-		parts := make([]string, 0, len(keys))
-		for _, key := range keys {
-			parts = append(parts, key+"="+evidenceValue(v[key]))
-		}
-		return strings.Join(parts, "; ")
 	default:
+		if encoded, err := json.MarshalIndent(value, "", "  "); err == nil {
+			return string(encoded)
+		}
 		return fmt.Sprint(value)
 	}
+}
+
+func reportCostDisplay(cost int) string {
+	if cost <= 0 {
+		return "N/A"
+	}
+	return strconv.Itoa(cost)
+}
+
+func hasCacheTelemetry(results model.ProbeResultList) bool {
+	for _, result := range results {
+		if result.Kind != model.ProbeKindCacheRate && result.Kind != model.ProbeKindCacheAccounting {
+			continue
+		}
+		reportedWarm, hasReportedWarm := result.Evidence["reported_warm_samples"]
+		if hasReportedWarm && evidenceNumber(reportedWarm) > 0 {
+			return true
+		}
+		if _, hasLegacyTotal := result.Evidence["warm_cached_tokens"]; hasLegacyTotal && !hasReportedWarm {
+			return true
+		}
+		for _, sample := range evidenceMaps(result.Evidence["samples"]) {
+			if rawReported, exists := sample["telemetry_reported"]; exists {
+				if reported, ok := rawReported.(bool); ok && reported {
+					return true
+				}
+				continue
+			}
+			if _, legacyCachedTokens := sample["cached_tokens"]; legacyCachedTokens {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func firstOrEmpty(values []string) string {

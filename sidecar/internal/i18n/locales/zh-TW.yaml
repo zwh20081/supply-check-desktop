@@ -32,7 +32,7 @@ healthcheck.report.chart.coverage_summary: "共 {{.Targets}} 個目標，記錄 
 healthcheck.report.summary_line: "判定：{{.Verdict}}　信任分：{{.Score}}/100　上游成本：{{.Cost}}"
 healthcheck.report.cache_rate.title: "總快取率（長上下文）"
 healthcheck.report.cache_rate.single_summary: "{{.Loops}} 輪熱請求命中 {{.Hits}}/{{.Prompts}}；快取 {{.Cached}}/{{.Tokens}} token"
-healthcheck.report.cache_rate.batch_summary: "{{.Covered}}/{{.Targets}} 個目標提供快取遙測；熱請求快取 {{.Cached}}/{{.Tokens}} token"
+healthcheck.report.cache_rate.batch_summary: "{{.Covered}}/{{.Targets}} 個目標完成有效快取率計算；{{.Telemetry}}/{{.Targets}} 個目標存在快取 Token 遙測；有效熱請求快取 {{.Cached}}/{{.Tokens}} Token"
 healthcheck.report.cache_rate.per_target_title: "各目標快取率"
 healthcheck.report.cache_rate.field.prompt: "提示詞"
 healthcheck.report.cache_rate.field.phase: "階段"

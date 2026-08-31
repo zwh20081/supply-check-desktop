@@ -32,7 +32,7 @@ healthcheck.report.chart.coverage_summary: "{{.Targets}} 件の対象、{{.Probe
 healthcheck.report.summary_line: "判定：{{.Verdict}}    信頼スコア：{{.Score}}/100    上流コスト：{{.Cost}}"
 healthcheck.report.cache_rate.title: "総キャッシュ率（長文コンテキスト）"
 healthcheck.report.cache_rate.single_summary: "ウォームループ {{.Loops}} 回、ヒット {{.Hits}}/{{.Prompts}}、キャッシュ {{.Cached}}/{{.Tokens}} トークン"
-healthcheck.report.cache_rate.batch_summary: "{{.Covered}}/{{.Targets}} 件がキャッシュ情報を報告、ウォーム要求のキャッシュ {{.Cached}}/{{.Tokens}} トークン"
+healthcheck.report.cache_rate.batch_summary: "キャッシュ率を算出できた対象：{{.Covered}}/{{.Targets}} 件、キャッシュトークン情報あり：{{.Telemetry}}/{{.Targets}} 件、有効なウォームサンプル：{{.Cached}}/{{.Tokens}} トークン"
 healthcheck.report.cache_rate.per_target_title: "ターゲット別キャッシュ率"
 healthcheck.report.cache_rate.field.prompt: "プロンプト"
 healthcheck.report.cache_rate.field.phase: "段階"

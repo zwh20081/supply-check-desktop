@@ -32,7 +32,7 @@ healthcheck.report.chart.coverage_summary: "{{.Targets}} targets with {{.Probes}
 healthcheck.report.summary_line: "Verdict: {{.Verdict}}    Trust score: {{.Score}}/100    Upstream cost: {{.Cost}}"
 healthcheck.report.cache_rate.title: "TOTAL CACHE RATE (LONG CONTEXT)"
 healthcheck.report.cache_rate.single_summary: "{{.Loops}} warm loops hit {{.Hits}}/{{.Prompts}} samples; cached {{.Cached}}/{{.Tokens}} tokens"
-healthcheck.report.cache_rate.batch_summary: "{{.Covered}}/{{.Targets}} targets reported cache telemetry; warm requests cached {{.Cached}}/{{.Tokens}} tokens"
+healthcheck.report.cache_rate.batch_summary: "Cache rate computed for {{.Covered}}/{{.Targets}} targets; cache-token telemetry present for {{.Telemetry}}/{{.Targets}}; valid warm samples cached {{.Cached}}/{{.Tokens}} tokens"
 healthcheck.report.cache_rate.per_target_title: "Cache rate by target"
 healthcheck.report.cache_rate.field.prompt: "Prompt"
 healthcheck.report.cache_rate.field.phase: "Phase"

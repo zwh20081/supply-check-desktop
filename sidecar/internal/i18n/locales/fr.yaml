@@ -32,7 +32,7 @@ healthcheck.report.chart.coverage_summary: "{{.Targets}} cibles et {{.Probes}} r
 healthcheck.report.summary_line: "Verdict : {{.Verdict}}    Confiance : {{.Score}}/100    Coût amont : {{.Cost}}"
 healthcheck.report.cache_rate.title: "TAUX DE CACHE GLOBAL (CONTEXTE LONG)"
 healthcheck.report.cache_rate.single_summary: "{{.Loops}} boucles chaudes : {{.Hits}}/{{.Prompts}} échantillons servis du cache ; {{.Cached}}/{{.Tokens}} jetons en cache"
-healthcheck.report.cache_rate.batch_summary: "{{.Covered}}/{{.Targets}} cibles ont fourni la télémétrie du cache ; {{.Cached}}/{{.Tokens}} jetons en cache"
+healthcheck.report.cache_rate.batch_summary: "Taux calculé pour {{.Covered}}/{{.Targets}} cibles ; télémétrie des jetons de cache pour {{.Telemetry}}/{{.Targets}} ; échantillons valides : {{.Cached}}/{{.Tokens}} jetons en cache"
 healthcheck.report.cache_rate.per_target_title: "Taux de cache par cible"
 healthcheck.report.cache_rate.field.prompt: "Invite"
 healthcheck.report.cache_rate.field.phase: "Étape"

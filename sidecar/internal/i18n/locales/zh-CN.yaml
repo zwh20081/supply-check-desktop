@@ -32,7 +32,7 @@ healthcheck.report.chart.coverage_summary: "共 {{.Targets}} 个目标，记录 
 healthcheck.report.summary_line: "判定：{{.Verdict}}　信任分：{{.Score}}/100　上游成本：{{.Cost}}"
 healthcheck.report.cache_rate.title: "总缓存率（长上下文）"
 healthcheck.report.cache_rate.single_summary: "{{.Loops}} 轮热请求命中 {{.Hits}}/{{.Prompts}}；缓存 {{.Cached}}/{{.Tokens}} token"
-healthcheck.report.cache_rate.batch_summary: "{{.Covered}}/{{.Targets}} 个目标提供缓存遥测；热请求缓存 {{.Cached}}/{{.Tokens}} token"
+healthcheck.report.cache_rate.batch_summary: "{{.Covered}}/{{.Targets}} 个目标完成有效缓存率计算；{{.Telemetry}}/{{.Targets}} 个目标存在缓存 Token 遥测；有效热请求缓存 {{.Cached}}/{{.Tokens}} Token"
 healthcheck.report.cache_rate.per_target_title: "各目标缓存率"
 healthcheck.report.cache_rate.field.prompt: "提示词"
 healthcheck.report.cache_rate.field.phase: "阶段"

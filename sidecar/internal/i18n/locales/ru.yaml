@@ -32,7 +32,7 @@ healthcheck.report.chart.coverage_summary: "Целей: {{.Targets}}, запис
 healthcheck.report.summary_line: "Вердикт: {{.Verdict}}    Доверие: {{.Score}}/100    Затраты провайдера: {{.Cost}}"
 healthcheck.report.cache_rate.title: "ОБЩАЯ ДОЛЯ КЭША (ДЛИННЫЙ КОНТЕКСТ)"
 healthcheck.report.cache_rate.single_summary: "Тёплых циклов: {{.Loops}}; попадания {{.Hits}}/{{.Prompts}}; кэшировано {{.Cached}}/{{.Tokens}} токенов"
-healthcheck.report.cache_rate.batch_summary: "{{.Covered}}/{{.Targets}} целей предоставили телеметрию кэша; кэшировано {{.Cached}}/{{.Tokens}} токенов"
+healthcheck.report.cache_rate.batch_summary: "Доля кэша рассчитана для {{.Covered}}/{{.Targets}} целей; телеметрия токенов кэша есть для {{.Telemetry}}/{{.Targets}}; в валидных выборках кэшировано {{.Cached}}/{{.Tokens}} токенов"
 healthcheck.report.cache_rate.per_target_title: "Доля кэша по целям"
 healthcheck.report.cache_rate.field.prompt: "Запрос"
 healthcheck.report.cache_rate.field.phase: "Фаза"
