@@ -294,3 +294,78 @@ func TestQuality_SectionAndEvidenceHeadingsReserveClearSpace(t *testing.T) {
 	report.addEvidenceHeading("Model identity validation", "Failed")
 	require.GreaterOrEqual(t, startY-report.y, 39.0, "evidence heading needs clearance above and below its text")
 }
+
+func TestQuality_EvidenceHeadingKeepsCompactBlockOnOnePage(t *testing.T) {
+	report := newPDFReport(i18n.LangEn)
+	report.y = reportPDFBottom + 95
+	report.addEvidenceHeading("Model identity validation", "Pass")
+
+	require.Len(t, report.pages, 2, "heading should move instead of orphaning a compact evidence block")
+	require.Greater(t, report.y, reportPDFBottom+76, "new page must retain room for the compact block")
+}
+
+func TestQuality_BatchTrustScoreLabelsLeadWithModel(t *testing.T) {
+	task := &model.HealthCheckTask{
+		ChannelID: 17, ChannelName: "Claude Bedrock production channel with a long display name",
+		Model: "claude-haiku-4-5-20251001-v1:0", Verdict: model.ProbeVerdictOK, TrustScore: 96,
+	}
+	label := batchTrustScoreLabel(task)
+	visible := firstOrEmpty(wrapPDFText(label, 190-8, 8.2))
+
+	require.Equal(t, "claude-haiku-4-5-20251001-v1:0 / #17", label)
+	require.Contains(t, visible, "claude-haiku", "the differentiating model identifier must be visible")
+	require.Contains(t, visible, "#17", "the compact label must retain channel context")
+	require.NotContains(t, visible, task.ChannelName, "the full channel name belongs in the target table, not the compact chart label")
+}
+
+func TestQuality_AbsoluteTTFTWithoutBaselineIsNotReportedAsMissing(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	result := model.ProbeResult{
+		ProbeKey: "p5_latency", Kind: model.ProbeKindLatency, Status: model.ProbeStatusSkip,
+		Evidence: map[string]any{
+			"ttft_ms": 1968, "first_response_ms": 2400,
+			"baseline_first_ms": 0, "baseline_tokens_per_sec": 0,
+			"reason": "no baseline yet",
+		},
+	}
+
+	latencyMs, basis, noBaseline := reportLatencySample(result)
+	require.Equal(t, int64(1968), latencyMs)
+	require.Equal(t, "TTFT", basis)
+	require.True(t, noBaseline)
+
+	report := newPDFReport(i18n.LangEn)
+	report.addProbeCharts(model.ProbeResultList{result})
+	content := report.page.content.String()
+	require.NotContains(t, content, "No latency data available")
+	require.Contains(t, content, "Absolute latency measurements are shown")
+	require.Contains(t, content, "(1968ms)", "the absolute TTFT value should remain visible in the chart")
+}
+
+func TestQuality_MultipageTablesRepeatHeadersAndAvoidAnOrphanFinalRow(t *testing.T) {
+	report := newPDFReport(i18n.LangEn)
+	// Exactly enough room for the header and three rows. The final two rows must
+	// move together to a continuation page with a repeated header.
+	report.y = reportPDFBottom + 96
+	headers := []string{"Prompt", "Value"}
+	rows := [][]string{
+		{"row-1", "1"}, {"row-2", "2"}, {"row-3", "3"},
+		{"row-4", "4"}, {"row-5", "5"},
+	}
+	report.addTable(headers, rows, []float64{120, 120}, nil)
+
+	require.Len(t, report.pages, 2)
+	for _, page := range report.pages {
+		require.Contains(t, page.content.String(), "(Prompt)", "every table continuation page needs its header")
+	}
+	continuation := report.pages[1].content.String()
+	require.Contains(t, continuation, "(row-4)")
+	require.Contains(t, continuation, "(row-5)")
+}
+
+func TestQuality_CacheSamplePromptHeaderDoesNotSplitInsideTheWord(t *testing.T) {
+	promptColumnWidth := cacheRateSampleColumnWidths()[0]
+	lines := wrapPDFText("Prompt", promptColumnWidth-12, 8.7)
+	require.Equal(t, []string{"Prompt"}, lines)
+	require.LessOrEqual(t, pdfTextWidth("Prompt", 8.7), promptColumnWidth-12)
+}

@@ -599,27 +599,81 @@ func (r *pdfReport) addProbeCharts(results model.ProbeResultList) {
 	latencies := make([]reportChartItem, 0, len(results))
 	var totalLatency int64
 	var maxLatency int64
+	measuredWithoutBaseline := false
 	for _, result := range results {
-		if result.LatencyMs <= 0 {
+		latencyMs, basis, noBaseline := reportLatencySample(result)
+		if latencyMs <= 0 {
 			continue
 		}
-		totalLatency += result.LatencyMs
-		maxLatency = max(maxLatency, result.LatencyMs)
+		totalLatency += latencyMs
+		maxLatency = max(maxLatency, latencyMs)
+		measuredWithoutBaseline = measuredWithoutBaseline || noBaseline
+		label := localizedProbeKind(r.lang, result.Kind)
+		if basis != "" {
+			label += " (" + basis + ")"
+		}
 		latencies = append(latencies, reportChartItem{
-			label: localizedProbeKind(r.lang, result.Kind), value: float64(result.LatencyMs), color: colorBlue,
+			label: label, value: float64(latencyMs), color: colorBlue,
 		})
 	}
 	if len(latencies) == 0 {
 		r.addEmptyChart(trReport(r.lang, i18n.MsgHealthCheckReportChartLatency), trReport(r.lang, i18n.MsgHealthCheckReportChartNoLatency))
 		return
 	}
+	summary := trReport(r.lang, i18n.MsgHealthCheckReportChartLatencySummary, map[string]any{
+		"Count": len(latencies), "Average": totalLatency / int64(len(latencies)), "Maximum": maxLatency,
+	})
+	if measuredWithoutBaseline {
+		summary += " " + latencyWithoutBaselineNote(r.lang)
+	}
 	r.addBarChart(
 		trReport(r.lang, i18n.MsgHealthCheckReportChartLatency),
-		trReport(r.lang, i18n.MsgHealthCheckReportChartLatencySummary, map[string]any{
-			"Count": len(latencies), "Average": totalLatency / int64(len(latencies)), "Maximum": maxLatency,
-		}),
+		summary,
 		latencies, "ms", 174,
 	)
+}
+
+// reportLatencySample returns the best absolute latency measurement available
+// for the chart. ProbeLatency can legitimately be skipped when there is no
+// comparison baseline while still carrying a useful TTFT/first-response
+// measurement in evidence, so those values must not be presented as "no data".
+func reportLatencySample(result model.ProbeResult) (latencyMs int64, basis string, noBaseline bool) {
+	latencyMs = result.LatencyMs
+	if latencyMs <= 0 && result.Kind == model.ProbeKindLatency {
+		if ttft := int64(evidenceNumber(result.Evidence["ttft_ms"])); ttft > 0 {
+			latencyMs = ttft
+			basis = "TTFT"
+		} else if firstResponse := int64(evidenceNumber(result.Evidence["first_response_ms"])); firstResponse > 0 {
+			latencyMs = firstResponse
+			basis = "first response"
+		}
+	}
+	if latencyMs <= 0 || result.Kind != model.ProbeKindLatency {
+		return latencyMs, basis, false
+	}
+	baselineFirst := evidenceNumber(result.Evidence["baseline_first_ms"])
+	baselineThroughput := evidenceNumber(result.Evidence["baseline_tokens_per_sec"])
+	noBaseline = baselineFirst <= 0 && baselineThroughput <= 0
+	return latencyMs, basis, noBaseline
+}
+
+func latencyWithoutBaselineNote(lang string) string {
+	switch lang {
+	case i18n.LangZhCN:
+		return "已显示绝对时延测量值；暂无基线可用于对比。"
+	case i18n.LangZhTW:
+		return "已顯示絕對延遲測量值；暫無基準可供比較。"
+	case i18n.LangFr:
+		return "Les mesures de latence absolue sont affichées ; aucune référence n'est disponible pour la comparaison."
+	case i18n.LangRu:
+		return "Показаны абсолютные измерения задержки; базовый уровень для сравнения отсутствует."
+	case i18n.LangJa:
+		return "絶対レイテンシーの測定値を表示しています。比較用のベースラインはまだありません。"
+	case i18n.LangVi:
+		return "Đã hiển thị số đo độ trễ tuyệt đối; chưa có đường cơ sở để so sánh."
+	default:
+		return "Absolute latency measurements are shown; no baseline is available for comparison."
+	}
 }
 
 func (r *pdfReport) addBatchCharts(tasks []*model.HealthCheckTask, runs map[int]*model.ProbeRun) {
@@ -639,7 +693,7 @@ func (r *pdfReport) addBatchCharts(tasks []*model.HealthCheckTask, runs map[int]
 			continue
 		}
 		scores = append(scores, reportChartItem{
-			label: channelDisplay(task.ChannelID, task.ChannelName) + " / " + task.Model,
+			label: batchTrustScoreLabel(task),
 			value: float64(task.TrustScore), color: verdictColor(task.Verdict),
 		})
 	}
@@ -659,6 +713,13 @@ func (r *pdfReport) addBatchCharts(tasks []*model.HealthCheckTask, runs map[int]
 		"Targets": len(tasks), "Probes": totalProbes,
 	}), colorMuted, false)
 	r.y -= 18
+}
+
+// batchTrustScoreLabel keeps the model in the visible prefix. The bar chart
+// intentionally renders a compact single-line label; the target table retains
+// the full channel name, while the channel ID keeps this chart unambiguous.
+func batchTrustScoreLabel(task *model.HealthCheckTask) string {
+	return fmt.Sprintf("%s / #%d", task.Model, task.ChannelID)
 }
 
 func (r *pdfReport) addDistributionChart(title string, items []reportChartItem) {
@@ -754,30 +815,64 @@ func verdictColor(verdict string) pdfColor {
 
 func (r *pdfReport) addTable(headers []string, rows [][]string, widths []float64, boldColumns []bool) {
 	if len(headers) > 0 {
+		// Keep the first header with meaningful data, and use the same lookahead
+		// at every page boundary so the final page does not contain only one
+		// orphaned data row.
+		reserve := tableRowHeight(headers, widths)
+		for index := 0; index < min(2, len(rows)); index++ {
+			reserve += tableRowHeight(rows[index], widths)
+		}
+		r.ensure(reserve)
 		r.drawTableRow(headers, widths, true, nil)
 	}
-	for _, row := range rows {
+	for index, row := range rows {
+		rowHeight := tableRowHeight(row, widths)
+		remaining := len(rows) - index
+		needed := rowHeight
+		if len(headers) > 0 && remaining == 2 {
+			needed += tableRowHeight(rows[index+1], widths)
+		}
+		if r.y-needed < reportPDFBottom {
+			r.newPage()
+			if len(headers) > 0 {
+				r.drawTableRow(headers, widths, true, nil)
+			}
+		}
 		r.drawTableRow(row, widths, false, boldColumns)
 	}
 	r.y -= 8
 }
 
-func (r *pdfReport) drawTableRow(values []string, widths []float64, header bool, boldColumns []bool) {
-	fontSize := 8.7
-	lineHeight := 12.0
-	wrapped := make([][]string, len(widths))
+func tableRowHeight(values []string, widths []float64) float64 {
+	const (
+		fontSize   = 8.7
+		lineHeight = 12.0
+	)
 	maxLines := 1
 	for index, width := range widths {
 		value := ""
 		if index < len(values) {
 			value = values[index]
 		}
-		wrapped[index] = wrapPDFText(value, width-12, fontSize)
-		if len(wrapped[index]) > maxLines {
-			maxLines = len(wrapped[index])
-		}
+		maxLines = max(maxLines, len(wrapPDFText(value, width-12, fontSize)))
 	}
-	height := 12 + float64(maxLines)*lineHeight
+	return 12 + float64(maxLines)*lineHeight
+}
+
+func (r *pdfReport) drawTableRow(values []string, widths []float64, header bool, boldColumns []bool) {
+	const (
+		fontSize   = 8.7
+		lineHeight = 12.0
+	)
+	wrapped := make([][]string, len(widths))
+	for index, width := range widths {
+		value := ""
+		if index < len(values) {
+			value = values[index]
+		}
+		wrapped[index] = wrapPDFText(value, width-12, fontSize)
+	}
+	height := tableRowHeight(values, widths)
 	r.ensure(height)
 	x := reportPDFMargin
 	for index, width := range widths {
@@ -833,10 +928,13 @@ func (r *pdfReport) addEvidence(results model.ProbeResultList) {
 
 func (r *pdfReport) addEvidenceHeading(name, status string) {
 	const (
-		topGap           = 18.0
-		lineHeight       = 15.0
-		bottomGap        = 6.0
-		followingReserve = 28.0
+		topGap     = 18.0
+		lineHeight = 15.0
+		bottomGap  = 6.0
+		// Most compact evidence blocks contain three short rows. Keep that block
+		// with its heading when possible so a page does not end after only the
+		// first field and resume with unlabeled continuation rows.
+		followingReserve = 76.0
 		statusColumn     = 130.0
 	)
 	nameLines := wrapPDFText(name, reportPDFContentWidth-statusColumn, 11.5)
@@ -915,9 +1013,15 @@ func (r *pdfReport) addCacheRateSampleTable(raw any) bool {
 			fmt.Sprintf("%.0f ms", evidenceNumber(sample["first_response_ms"])),
 		})
 	}
-	r.addTable(headers, rows, []float64{42, 45, 70, 82, 82, 82, 92}, nil)
+	// The prompt column needs enough inner width for the English header. Keeping
+	// it wider also improves short prompt IDs without sacrificing numeric data.
+	r.addTable(headers, rows, cacheRateSampleColumnWidths(), nil)
 	r.y -= 8
 	return true
+}
+
+func cacheRateSampleColumnWidths() []float64 {
+	return []float64{54, 48, 64, 78, 78, 78, 95}
 }
 
 func evidenceMaps(raw any) []map[string]any {
