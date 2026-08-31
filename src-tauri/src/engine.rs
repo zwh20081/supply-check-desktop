@@ -740,50 +740,261 @@ fn vendor_markers(vendor: &str) -> &'static [&'static str] {
 }
 
 fn normalize_model(model: &str) -> String {
-    let normalized = model
-        .trim()
-        .trim_start_matches("models/")
-        .to_ascii_lowercase();
+    let normalized = model.trim().to_ascii_lowercase().replace('_', "-");
+    let normalized = normalized
+        .strip_prefix("models/")
+        .unwrap_or(&normalized)
+        .to_string();
 
     // Bedrock inference profiles add routing/provider qualifiers to the model
     // ID. They do not indicate a different underlying Claude family.
-    if let Some((_, candidate)) = normalized.split_once("anthropic.") {
-        if candidate.starts_with("claude-") {
-            return candidate.to_string();
-        }
+    if let Some(candidate) = bedrock_claude_candidate(&normalized) {
+        return candidate.to_string();
     }
 
     normalized
 }
 
 fn model_family(model: &str) -> String {
-    let model = normalize_model(model);
-    if model.starts_with("claude") {
-        for family in ["opus", "sonnet", "haiku"] {
-            if model.contains(family) {
-                return format!("claude-{family}");
+    parse_model_identity(model).base
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CanonicalModelIdentity {
+    base: String,
+    snapshot: Option<String>,
+}
+
+fn parse_model_identity(model: &str) -> CanonicalModelIdentity {
+    let normalized_input = model.trim().to_ascii_lowercase().replace('_', "-");
+    let bedrock_qualified = bedrock_claude_candidate(&normalized_input).is_some();
+    let mut model = normalize_model(model);
+
+    // Fine-tuned deployment IDs are opaque; date/preview-shaped job names are
+    // part of their identity and must never be normalized away.
+    if model.starts_with("ft:") {
+        return CanonicalModelIdentity {
+            base: model,
+            snapshot: None,
+        };
+    }
+
+    // Strip only known Claude provider metadata. Arbitrary :/@/-vN suffixes
+    // remain identity-bearing (for example gpt-5:mini is not gpt-5).
+    if model.starts_with("claude-") {
+        if let Some(index) = bedrock_revision_suffix_start(&model) {
+            model.truncate(index);
+        } else if bedrock_qualified && has_numeric_v_suffix(&model) {
+            model.truncate(model.rfind('-').unwrap_or(model.len()));
+        }
+        if let Some((base, snapshot)) = model.rsplit_once('@') {
+            if is_compact_date(snapshot) || is_dashed_date(snapshot) {
+                model = base.to_string();
             }
         }
-        return "claude".to_string();
     }
-    if model.starts_with("gemini") {
-        return model.split('-').take(3).collect::<Vec<_>>().join("-");
-    }
-    for prefix in ["gpt-5", "gpt-4.1", "gpt-4o", "gpt-4", "o1", "o3", "o4"] {
-        if model.starts_with(prefix) {
-            return prefix.to_string();
+    let mut preview_stripped = false;
+    if model.starts_with("gemini-") {
+        if let Some(index) = preview_suffix_start(&model) {
+            model.truncate(index);
+            preview_stripped = true;
         }
     }
-    model.split('-').take(2).collect::<Vec<_>>().join("-")
+    let mut metadata_stripped = preview_stripped;
+    if !metadata_stripped {
+        if let Some(index) = snapshot_date_start(&model) {
+            model.truncate(index);
+            metadata_stripped = true;
+        }
+    }
+    if !metadata_stripped && !model.starts_with("gemini-") {
+        if let Some(base) = model.strip_suffix("-latest") {
+            model = base.to_string();
+        }
+    }
+    // Claude IDs occur in both generation-first and flavor-first order. Keep
+    // both dimensions while normalizing that spelling difference.
+    if let Some(rest) = model.strip_prefix("claude-") {
+        let mut versions = Vec::new();
+        let mut flavor = None;
+        let mut modifiers = Vec::new();
+        for part in rest.split('-') {
+            if matches!(part, "opus" | "sonnet" | "haiku") {
+                flavor = Some(part);
+            } else if is_numeric_version_part(part) {
+                versions.push(part);
+            } else if !part.is_empty() {
+                modifiers.push(part);
+            }
+        }
+        let mut canonical = vec!["claude"];
+        canonical.extend(versions);
+        if let Some(flavor) = flavor {
+            canonical.push(flavor);
+        }
+        canonical.extend(modifiers);
+        model = canonical.join("-");
+    }
+
+    let snapshot = if model.starts_with("gemini-") && !metadata_stripped {
+        if let Some((base, revision)) = gemini_revision_suffix(&model) {
+            let base = base.to_string();
+            let revision = revision.to_string();
+            model = base;
+            metadata_stripped = true;
+            Some(revision)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Apply the alias only after checking immutable Gemini revisions. Thus a
+    // malformed chained suffix such as -002-latest remains identity-bearing.
+    if !metadata_stripped && model.starts_with("gemini-") {
+        if let Some(base) = model.strip_suffix("-latest") {
+            model = base.to_string();
+        }
+    }
+
+    CanonicalModelIdentity {
+        base: model,
+        snapshot,
+    }
+}
+
+fn bedrock_claude_candidate(normalized: &str) -> Option<&str> {
+    [
+        "global.anthropic.",
+        "us.anthropic.",
+        "eu.anthropic.",
+        "apac.anthropic.",
+        "global-anthropic.",
+        "us-anthropic.",
+        "eu-anthropic.",
+        "apac-anthropic.",
+    ]
+    .iter()
+    .find_map(|prefix| normalized.strip_prefix(prefix))
+    .filter(|candidate| candidate.starts_with("claude-"))
 }
 
 fn same_model_family(requested: &str, observed: &str) -> bool {
-    let requested = normalize_model(requested);
-    let observed = normalize_model(observed);
-    requested == observed
-        || requested.contains(&observed)
-        || observed.contains(&requested)
-        || model_family(&requested) == model_family(&observed)
+    let requested = parse_model_identity(requested);
+    let observed = parse_model_identity(observed);
+    requested.base == observed.base
+        && (requested.snapshot.is_none()
+            || observed.snapshot.is_none()
+            || requested.snapshot == observed.snapshot)
+}
+
+fn snapshot_date_start(model: &str) -> Option<usize> {
+    if let Some((base, suffix)) = model.rsplit_once('-') {
+        if is_compact_date(suffix) {
+            return Some(base.len());
+        }
+    }
+    let mut parts = model.rsplitn(4, '-');
+    let day = parts.next()?;
+    let month = parts.next()?;
+    let year = parts.next()?;
+    let base = parts.next()?;
+    if is_two_digits(day)
+        && is_two_digits(month)
+        && year.len() == 4
+        && year.starts_with("20")
+        && year.chars().all(|character| character.is_ascii_digit())
+    {
+        return Some(base.len());
+    }
+    None
+}
+
+fn preview_suffix_start(model: &str) -> Option<usize> {
+    let index = model.rfind("-preview")?;
+    let suffix = &model[index + "-preview".len()..];
+    if suffix.is_empty() {
+        return Some(index);
+    }
+    let suffix = suffix.strip_prefix('-')?;
+    if is_month_day(suffix) || is_compact_date(suffix) || is_dashed_date(suffix) {
+        return Some(index);
+    }
+    None
+}
+
+fn bedrock_revision_suffix_start(model: &str) -> Option<usize> {
+    let (revision, subrevision) = model.rsplit_once(':')?;
+    if subrevision.is_empty()
+        || !subrevision
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    let (base, version) = revision.rsplit_once("-v")?;
+    (!version.is_empty() && version.chars().all(|character| character.is_ascii_digit()))
+        .then_some(base.len())
+}
+
+fn has_numeric_v_suffix(model: &str) -> bool {
+    model.rsplit('-').next().is_some_and(|part| {
+        part.len() > 1
+            && part.starts_with('v')
+            && part[1..]
+                .chars()
+                .all(|character| character.is_ascii_digit())
+    })
+}
+
+fn gemini_revision_suffix(model: &str) -> Option<(&str, &str)> {
+    let (base, revision) = model.rsplit_once('-')?;
+    (revision.len() == 3 && revision.chars().all(|character| character.is_ascii_digit()))
+        .then_some((base, revision))
+}
+
+fn is_two_digits(value: &str) -> bool {
+    value.len() == 2 && value.chars().all(|character| character.is_ascii_digit())
+}
+
+fn is_month_day(value: &str) -> bool {
+    value
+        .split_once('-')
+        .is_some_and(|(month, day)| is_two_digits(month) && is_two_digits(day))
+}
+
+fn is_compact_date(value: &str) -> bool {
+    value.len() == 8
+        && value.starts_with("20")
+        && value.chars().all(|character| character.is_ascii_digit())
+}
+
+fn is_dashed_date(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let Some(year) = parts.next() else {
+        return false;
+    };
+    let Some(month) = parts.next() else {
+        return false;
+    };
+    let Some(day) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && year.len() == 4
+        && year.starts_with("20")
+        && year.chars().all(|character| character.is_ascii_digit())
+        && is_two_digits(month)
+        && is_two_digits(day)
+}
+
+fn is_numeric_version_part(part: &str) -> bool {
+    !part.is_empty()
+        && part
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '.')
+        && part.chars().any(|character| character.is_ascii_digit())
 }
 
 fn is_reasoning_model(model: &str) -> bool {
@@ -839,6 +1050,94 @@ mod tests {
             "global.anthropic.claude-haiku-4-5-20251001-v1:0"
         ));
         assert!(!same_model_family("gpt-5", "claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn identity_family_preserves_generation_and_variant() {
+        assert!(!same_model_family(
+            "claude-3-haiku-20240307",
+            "claude-haiku-4-5-20251001"
+        ));
+        assert!(same_model_family(
+            "claude-haiku-4-5-20251001",
+            "global.anthropic.claude-haiku-4-5-20251115-v1:0"
+        ));
+        assert!(same_model_family(
+            "claude-haiku-4-5-20251001",
+            "GLOBAL_ANTHROPIC.CLAUDE_HAIKU_4_5_20251001_V1:0"
+        ));
+        assert!(!same_model_family(
+            "gemini-2.5-pro-preview-03-25",
+            "models/gemini-2.5-flash-20250605"
+        ));
+        assert!(same_model_family(
+            "models/gemini-2.5-pro-preview-03-25",
+            "gemini-2.5-pro-20250605"
+        ));
+        assert!(same_model_family("gemini-1.5-pro", "gemini-1.5-pro-002"));
+        assert!(!same_model_family(
+            "gemini-1.5-pro-001",
+            "gemini-1.5-pro-002"
+        ));
+        assert!(!same_model_family("gpt-4", "gpt-4o"));
+        assert!(!same_model_family("gpt-5", "gpt-5-mini"));
+        assert!(same_model_family("gpt-5-mini", "gpt-5-mini-2026-01-01"));
+        assert!(!same_model_family(
+            "claude-3-haiku",
+            "claude-3-haiku-thinking"
+        ));
+        assert!(!same_model_family("gpt-5", "gpt-5-v"));
+        assert!(!same_model_family("gpt-5", "gpt-5-v2"));
+        assert!(!same_model_family("gpt-5", "gpt-5:mini"));
+        assert!(!same_model_family("gpt-5", "gpt-5@mini"));
+        assert!(!same_model_family(
+            "ft:gpt-4o-mini:org:job-a",
+            "ft:gpt-4o-mini:org:job-b"
+        ));
+        assert!(!same_model_family(
+            "ft:gpt-4o-mini:org:job",
+            "ft:gpt-4o-mini:org:job-20260101"
+        ));
+        assert!(!same_model_family(
+            "claude-haiku-4-5",
+            "evil.anthropic.claude-haiku-4-5-v1:0"
+        ));
+        assert!(!same_model_family(
+            "claude-haiku-4-5-anthropic.fake",
+            "claude-haiku-4-5-anthropic.fake-v2"
+        ));
+        assert!(!same_model_family("gpt-5", "gpt-5-20260101-preview"));
+        assert!(!same_model_family(
+            "gemini-1.5-pro",
+            "gemini-1.5-pro-002-latest"
+        ));
+        assert!(!same_model_family(
+            "gemini-2.5-pro",
+            "gemini-2.5-pro-20260101-preview"
+        ));
+        assert!(!same_model_family(
+            "gemini-1.5-pro",
+            "gemini-1.5-pro-002-preview"
+        ));
+        assert!(!same_model_family("gpt-5", "gpt-5-latest-20260101"));
+        assert!(!same_model_family(
+            "gemini-2.5-pro",
+            "gemini-2.5-pro-latest-20260101"
+        ));
+        assert!(!same_model_family(
+            "gemini-1.5-pro",
+            "gemini-1.5-pro-002-20260101"
+        ));
+        assert!(!same_model_family(
+            "claude-3-haiku",
+            "claude-latest-3-haiku"
+        ));
+        assert!(!same_model_family("gpt-5", "gpt-5-2026mini"));
+        assert!(!same_model_family(
+            "gemini-2.5-pro",
+            "gemini-2.5-pro-preview2"
+        ));
+        assert!(!same_model_family("o1", "o1-preview"));
     }
 
     #[test]

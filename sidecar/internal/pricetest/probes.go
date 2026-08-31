@@ -10,6 +10,8 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"supply-check-sdk/internal/model"
 )
@@ -300,20 +302,31 @@ type vendorProfile struct {
 var bigVendors = []vendorProfile{
 	{"anthropic", []string{"claude", "anthropic"}},
 	{"openai", []string{"openai", "chatgpt"}},
-	{"google", []string{"gemini", "google deepmind", "bard"}},
+	{"google", []string{"gemini", "google deepmind", "google bard", "google"}},
 }
 
 // wrapperMarkers are agent / IDE / aggregator product names. If a "who are you?"
 // answer contains one, the channel is almost certainly reselling access through
 // that tool's subscription rather than a clean official API — a repackaged
-// ("non-pure") source. Lowercase; matched as substrings.
+// ("non-pure") source. Lowercase; matched as independent words/phrases.
 var wrapperMarkers = []string{
 	"kiro", "cursor", "cline", "roo code", "roocode", "windsurf",
-	"codeium", "github copilot", "copilot", "sourcegraph", "cody",
+	"codeium", "github copilot", "microsoft copilot", "copilot", "sourcegraph", "cody",
 	"tabnine", "augment", "trae", "amazon q", "q developer",
 	"supermaven", "devin", "bolt.new", "lovable", "poe", "phind",
 	"you.com", "perplexity",
 }
+
+// These product names are also ordinary English words or personal names. A
+// bare occurrence is not enough; require self-identification or hosting/tool
+// context before treating it as a wrapper disclosure.
+var ambiguousWrapperMarkers = map[string]bool{
+	"cursor": true, "windsurf": true, "copilot": true, "cody": true,
+	"augment": true, "trae": true, "devin": true, "lovable": true,
+	"poe": true, "perplexity": true,
+}
+
+const redactedSelfReport = "[redacted upstream self-report]"
 
 // otherModelNames are self-identifications belonging to non-big-three model
 // families. On a channel that requested a big-three model, leaking one of these
@@ -341,13 +354,155 @@ func expectedVendor(modelName string) *vendorProfile {
 	return nil
 }
 
-func containsAny(haystack string, needles []string) (string, bool) {
-	for _, n := range needles {
-		if strings.Contains(haystack, n) {
-			return n, true
+// containsBoundedMarker matches product names only when the runes immediately
+// outside the marker are not part of a word. This keeps short product names
+// such as "cline" and "poe" useful without treating ordinary words such as
+// "decline" and "poetry" as wrapper disclosures. Boundary checks operate on
+// Unicode runes so non-ASCII letters cannot accidentally create a boundary.
+func containsBoundedMarker(haystack string, markers []string) (string, bool) {
+	for _, marker := range markers {
+		if _, found := boundedMarkerIndex(haystack, marker); found {
+			return marker, true
 		}
 	}
 	return "", false
+}
+
+func boundedMarkerIndex(haystack, marker string) (int, bool) {
+	indices := boundedMarkerIndices(haystack, marker)
+	if len(indices) == 0 {
+		return 0, false
+	}
+	return indices[0], true
+}
+
+func boundedMarkerIndices(haystack, marker string) []int {
+	indices := make([]int, 0, 1)
+	searchFrom := 0
+	for searchFrom <= len(haystack) {
+		rel := strings.Index(haystack[searchFrom:], marker)
+		if rel < 0 {
+			break
+		}
+		start := searchFrom + rel
+		end := start + len(marker)
+		leftBoundary := start == 0 || !isMarkerWordRune(previousRune(haystack[:start]))
+		rightBoundary := end == len(haystack) || !isMarkerWordRune(nextRune(haystack[end:]))
+		if leftBoundary && rightBoundary {
+			indices = append(indices, start)
+		}
+		searchFrom = start + 1
+	}
+	return indices
+}
+
+func isMarkerWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r) || r == '_'
+}
+
+func previousRune(s string) rune {
+	r, _ := utf8.DecodeLastRuneInString(s)
+	return r
+}
+
+func nextRune(s string) rune {
+	r, _ := utf8.DecodeRuneInString(s)
+	return r
+}
+
+func detectSelfReportWrapper(haystack string) (string, bool) {
+	for _, marker := range wrapperMarkers {
+		for _, start := range boundedMarkerIndices(haystack, marker) {
+			if ambiguousWrapperMarkers[marker] && !hasWrapperContext(haystack, marker, start) {
+				continue
+			}
+			return marker, true
+		}
+	}
+	return "", false
+}
+
+func detectIdentityClaim(haystack string, markers []string) (string, bool) {
+	normalizedReply := normalizeMarkerContext(haystack)
+	for _, marker := range markers {
+		if normalizedReply == normalizeMarkerContext(marker) {
+			return marker, true
+		}
+		for _, start := range boundedMarkerIndices(haystack, marker) {
+			before := normalizeMarkerContext(haystack[:start])
+			for _, prefix := range []string{
+				"i am", "i'm", "i am a", "i am an", "i'm a", "i'm an", "we are",
+				"this is", "my name is", "my model is", "my underlying model is",
+				"this model is", "this assistant is", "created by", "developed by",
+				"built by", "made by", "trained by", "provided by", "offered by",
+				"powered by", "from", "a model from", "an assistant from",
+			} {
+				if identityClaimPrefixMatches(before, prefix) {
+					return marker, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+func identityClaimPrefixMatches(before, prefix string) bool {
+	if before == prefix {
+		return true
+	}
+	if !strings.HasSuffix(before, " "+prefix) {
+		return false
+	}
+	preceding := strings.TrimSpace(strings.TrimSuffix(before, " "+prefix))
+	fields := strings.Fields(preceding)
+	if len(fields) > 3 {
+		fields = fields[len(fields)-3:]
+	}
+	for _, field := range fields {
+		switch field {
+		case "not", "never", "neither", "no":
+			return false
+		}
+	}
+	return true
+}
+
+func hasWrapperContext(haystack, marker string, start int) bool {
+	before := normalizeMarkerContext(haystack[:start])
+	after := normalizeMarkerContext(haystack[start+len(marker):])
+	for _, prefix := range []string{
+		"i am", "i'm", "we are", "inside", "within", "via", "through", "using",
+		"running in", "running inside", "running on", "accessed via", "accessed through",
+		"powered by", "served by", "hosted by", "inside the", "within the", "via the",
+		"through the", "using the", "running in the", "running inside the", "running on the",
+	} {
+		if before == prefix || strings.HasSuffix(before, " "+prefix) {
+			return true
+		}
+	}
+	for _, suffix := range []string{
+		"ide", "editor", "platform", "app", "application", "service", "subscription",
+		"tool", "environment", "client",
+	} {
+		if after == suffix || strings.HasPrefix(after, suffix+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeMarkerContext(value string) string {
+	value = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r):
+			return unicode.ToLower(r)
+		case r == '\'', r == '’':
+			return '\''
+		default:
+			return ' '
+		}
+	}, value)
+	return strings.Join(strings.Fields(value), " ")
 }
 
 // ProbeSelfReport (P8): ask the model who it is and read the answer, not the API
@@ -360,11 +515,11 @@ func containsAny(haystack string, needles []string) (string, bool) {
 func ProbeSelfReport(spec model.ProbeSpec, obs SelfReportObs) model.ProbeResult {
 	res := model.ProbeResult{ProbeKey: "p8_self_report", Kind: model.ProbeKindSelfReport}
 	content := strings.TrimSpace(obs.Content)
-	snippet := content
-	if r := []rune(snippet); len(r) > 240 {
-		snippet = string(r[:240]) + "…"
+	res.Evidence = map[string]any{
+		"requested":   obs.RequestedModel,
+		"reply":       redactedSelfReport,
+		"reply_chars": len([]rune(content)),
 	}
-	res.Evidence = map[string]any{"requested": obs.RequestedModel, "reply": snippet}
 	if content == "" {
 		res.Status = model.ProbeStatusSkip
 		res.Evidence["reason"] = "empty self-report reply"
@@ -376,7 +531,7 @@ func ProbeSelfReport(spec model.ProbeSpec, obs SelfReportObs) model.ProbeResult 
 	selfConfirmed := false
 	if vp != nil {
 		res.Evidence["expected_vendor"] = vp.key
-		_, selfConfirmed = containsAny(lc, vp.self)
+		_, selfConfirmed = detectIdentityClaim(lc, vp.self)
 		res.Evidence["self_confirmed"] = selfConfirmed
 	}
 
@@ -388,16 +543,16 @@ func ProbeSelfReport(spec model.ProbeSpec, obs SelfReportObs) model.ProbeResult 
 			if bigVendors[i].key == vp.key {
 				continue
 			}
-			if _, ok := containsAny(lc, bigVendors[i].self); ok {
+			if _, ok := detectIdentityClaim(lc, bigVendors[i].self); ok {
 				wrongVendor = bigVendors[i].key
 				break
 			}
 		}
 	}
-	marker, hasMarker := containsAny(lc, wrapperMarkers)
+	marker, hasMarker := detectSelfReportWrapper(lc)
 	foreignModel, hasForeign := "", false
 	if vp != nil && !selfConfirmed && wrongVendor == "" {
-		foreignModel, hasForeign = containsAny(lc, otherModelNames)
+		foreignModel, hasForeign = detectIdentityClaim(lc, otherModelNames)
 	}
 
 	switch {
@@ -480,54 +635,165 @@ func ProbeCostAnchor(spec model.ProbeSpec, obs CostAnchorObs) model.ProbeResult 
 
 // --- helpers ---------------------------------------------------------------
 
-var dateMarker = regexp.MustCompile(`-20\d{2}`)
+var (
+	versionSuffix       = regexp.MustCompile(`-v\d+$`)
+	bedrockRevision     = regexp.MustCompile(`-v\d+:\d+$`)
+	compactDateSuffix   = regexp.MustCompile(`-(20\d{6})$`)
+	dashedDateSuffix    = regexp.MustCompile(`-(20\d{2}-\d{2}-\d{2})$`)
+	previewSuffix       = regexp.MustCompile(`-preview(?:-(?:\d{2}-\d{2}|20\d{6}|20\d{2}-\d{2}-\d{2}))?$`)
+	geminiVersionSuffix = regexp.MustCompile(`-(\d{3})$`)
+	snapshotToken       = regexp.MustCompile(`^(?:20\d{6}|20\d{2}-\d{2}-\d{2})$`)
+)
 
-// modelFamily normalises a model id to a coarse family token (e.g.
-// "gpt-5-2026-01-01" → "gpt-5", "claude-3-opus-20240229" →
-// "claude-opus", "gemini-3.1-pro-preview" → "gemini-3.1"). Heuristic,
-// used only for the identity probe's family comparison.
+type canonicalModelIdentity struct {
+	base     string
+	snapshot string
+}
+
+var bedrockAnthropicPrefixes = []string{
+	"global.anthropic.", "us.anthropic.", "eu.anthropic.", "apac.anthropic.",
+	"global-anthropic.", "us-anthropic.", "eu-anthropic.", "apac-anthropic.",
+}
+
+// modelFamily returns a canonical identity containing both the model generation
+// and its service tier/variant. Snapshot dates, preview labels and Bedrock
+// routing qualifiers are deployment metadata, while tokens such as Claude's
+// generation, Gemini's pro/flash tier and GPT's mini tier are identity-bearing.
+// Keep this aligned with the desktop engine's model_family behavior.
 func modelFamily(name string) string {
+	identity := parseModelIdentity(name)
+	if identity.snapshot != "" {
+		return identity.base + "@" + identity.snapshot
+	}
+	return identity.base
+}
+
+func parseModelIdentity(name string) canonicalModelIdentity {
 	n := strings.ToLower(strings.TrimSpace(name))
 	n = strings.ReplaceAll(n, "_", "-")
+	n = strings.TrimPrefix(n, "models/")
 	// Bedrock inference profiles qualify Anthropic model IDs with a region and
 	// provider (for example, "global.anthropic.claude-haiku-4-5-...").  The
 	// qualifier describes routing, not a different model family.
-	if i := strings.Index(n, "anthropic."); i >= 0 {
-		candidate := n[i+len("anthropic."):]
+	bedrockQualified := false
+	for _, prefix := range bedrockAnthropicPrefixes {
+		candidate, matched := strings.CutPrefix(n, prefix)
+		if !matched {
+			continue
+		}
 		if strings.HasPrefix(candidate, "claude-") {
 			n = candidate
+			bedrockQualified = true
+			break
 		}
 	}
-	// Claude IDs have used both "claude-opus-..." and
-	// "claude-3-opus-..." forms. The flavor, rather than its position, is the
-	// stable family discriminator; generation and dated version tokens are not.
-	// Keep this aligned with the desktop engine's model_family behavior.
-	if strings.HasPrefix(n, "claude") {
-		for _, part := range strings.Split(n, "-") {
-			switch part {
-			case "opus", "sonnet", "haiku":
-				return "claude-" + part
-			}
+	// OpenAI fine-tuned deployment IDs are opaque identifiers. Their job name
+	// may legitimately end in a date- or preview-shaped token, so no generic
+	// snapshot normalization is safe.
+	if strings.HasPrefix(n, "ft:") {
+		return canonicalModelIdentity{base: n}
+	}
+
+	// Strip only known Claude provider metadata. Treat arbitrary :/@/-vN
+	// suffixes as identity-bearing so another family cannot exploit a broad
+	// truncation rule (for example, gpt-5:mini must not equal gpt-5).
+	if strings.HasPrefix(n, "claude-") {
+		switch {
+		case bedrockRevision.MatchString(n):
+			n = bedrockRevision.ReplaceAllString(n, "")
+		case bedrockQualified:
+			n = versionSuffix.ReplaceAllString(n, "")
 		}
-		return "claude"
-	}
-	if loc := dateMarker.FindStringIndex(n); loc != nil && loc[0] > 0 {
-		n = n[:loc[0]]
-	}
-	for _, sep := range []string{":", "@"} {
-		if i := strings.Index(n, sep); i > 0 {
+		if i := strings.LastIndex(n, "@"); i > 0 && snapshotToken.MatchString(n[i+1:]) {
 			n = n[:i]
 		}
 	}
-	parts := strings.Split(n, "-")
-	if len(parts) >= 2 {
-		return parts[0] + "-" + parts[1]
+
+	// Preview is a deployment channel label only when it is a complete suffix;
+	// strings such as "preview2" are identity-bearing and must remain intact.
+	previewStripped := false
+	if strings.HasPrefix(n, "gemini-") {
+		withoutPreview := previewSuffix.ReplaceAllString(n, "")
+		previewStripped = withoutPreview != n
+		n = withoutPreview
 	}
-	return n
+	metadataStripped := previewStripped
+	snapshot := ""
+	if !previewStripped {
+		if match := compactDateSuffix.FindStringIndex(n); match != nil {
+			n = n[:match[0]]
+			metadataStripped = true
+		} else if match := dashedDateSuffix.FindStringIndex(n); match != nil {
+			n = n[:match[0]]
+			metadataStripped = true
+		} else if strings.HasPrefix(n, "gemini-") {
+			// Google exposes three-digit immutable Gemini revisions. An unpinned
+			// alias may resolve to one, but two explicitly different revisions are
+			// not the same requested model identity.
+			if match := geminiVersionSuffix.FindStringSubmatchIndex(n); match != nil {
+				snapshot = n[match[2]:match[3]]
+				n = n[:match[0]]
+				metadataStripped = true
+			}
+		}
+	}
+	if !metadataStripped {
+		n = strings.TrimSuffix(n, "-latest")
+	}
+
+	// Claude has used both generation-first (claude-3-haiku) and flavor-first
+	// (claude-haiku-4-5) spellings. Canonicalize ordering without dropping the
+	// generation: 3/haiku and 4-5/haiku are deliberately different identities.
+	if strings.HasPrefix(n, "claude-") {
+		parts := strings.Split(strings.TrimPrefix(n, "claude-"), "-")
+		flavor := ""
+		versions := make([]string, 0, 2)
+		modifiers := make([]string, 0, 1)
+		for _, part := range parts {
+			switch part {
+			case "opus", "sonnet", "haiku":
+				flavor = part
+			default:
+				if isNumericVersionPart(part) {
+					versions = append(versions, part)
+				} else if part != "" {
+					modifiers = append(modifiers, part)
+				}
+			}
+		}
+		canonical := []string{"claude"}
+		canonical = append(canonical, versions...)
+		if flavor != "" {
+			canonical = append(canonical, flavor)
+		}
+		canonical = append(canonical, modifiers...)
+		n = strings.Join(canonical, "-")
+	}
+	return canonicalModelIdentity{base: n, snapshot: snapshot}
+}
+
+func isNumericVersionPart(part string) bool {
+	if part == "" {
+		return false
+	}
+	hasDigit := false
+	for _, r := range part {
+		if (r < '0' || r > '9') && r != '.' {
+			return false
+		}
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+		}
+	}
+	return hasDigit
 }
 
 func sameModelFamily(a, b string) bool {
-	return modelFamily(a) == modelFamily(b)
+	left, right := parseModelIdentity(a), parseModelIdentity(b)
+	if left.base != right.base {
+		return false
+	}
+	return left.snapshot == "" || right.snapshot == "" || left.snapshot == right.snapshot
 }
 
 // MatchGolden reports whether a golden item's expectation is satisfied by the

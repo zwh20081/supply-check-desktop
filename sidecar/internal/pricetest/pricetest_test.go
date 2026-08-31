@@ -296,6 +296,210 @@ func TestQuality_ClaudeIdentityFamilyIncludesFlavorAtAnySegment(t *testing.T) {
 	}
 }
 
+func TestQuality_IdentityComparisonPreservesGenerationAndVariant(t *testing.T) {
+	spec := model.ProbeSpec{}
+	tests := []struct {
+		name      string
+		requested string
+		upstream  string
+		want      string
+	}{
+		{
+			name:      "claude same flavor different generation",
+			requested: "claude-3-haiku-20240307",
+			upstream:  "claude-haiku-4-5-20251001",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "claude reordered version with bedrock qualifier",
+			requested: "claude-haiku-4-5-20251001",
+			upstream:  "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+			want:      model.ProbeStatusPass,
+		},
+		{
+			name:      "claude dated snapshots remain deployment metadata",
+			requested: "claude-haiku-4-5-20251001",
+			upstream:  "global.anthropic.claude-haiku-4-5-20251115-v1:0",
+			want:      model.ProbeStatusPass,
+		},
+		{
+			name:      "claude bedrock underscore qualifier",
+			requested: "claude-haiku-4-5-20251001",
+			upstream:  "GLOBAL_ANTHROPIC.CLAUDE_HAIKU_4_5_20251001_V1:0",
+			want:      model.ProbeStatusPass,
+		},
+		{
+			name:      "gemini tier swap",
+			requested: "gemini-2.5-pro-preview-03-25",
+			upstream:  "models/gemini-2.5-flash-20250605",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "gemini same variant preview and dated snapshot",
+			requested: "models/gemini-2.5-pro-preview-03-25",
+			upstream:  "gemini-2.5-pro-20250605",
+			want:      model.ProbeStatusPass,
+		},
+		{
+			name:      "gemini alias accepts immutable revision",
+			requested: "gemini-1.5-pro",
+			upstream:  "gemini-1.5-pro-002",
+			want:      model.ProbeStatusPass,
+		},
+		{
+			name:      "gemini pinned revisions must match",
+			requested: "gemini-1.5-pro-001",
+			upstream:  "gemini-1.5-pro-002",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "gpt tier swap",
+			requested: "gpt-5",
+			upstream:  "gpt-5-mini",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "gpt sibling family is not a substring match",
+			requested: "gpt-4",
+			upstream:  "gpt-4o",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "gpt dated snapshot",
+			requested: "gpt-5-mini",
+			upstream:  "gpt-5-mini-2026-01-01",
+			want:      model.ProbeStatusPass,
+		},
+		{
+			name:      "claude identity modifier is preserved",
+			requested: "claude-3-haiku",
+			upstream:  "claude-3-haiku-thinking",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "bare provider revision marker is identity bearing",
+			requested: "gpt-5",
+			upstream:  "gpt-5-v",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "unknown version suffix is identity bearing",
+			requested: "gpt-5",
+			upstream:  "gpt-5-v2",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "unknown colon suffix is identity bearing",
+			requested: "gpt-5",
+			upstream:  "gpt-5:mini",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "unknown at suffix is identity bearing",
+			requested: "gpt-5",
+			upstream:  "gpt-5@mini",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "fine tuned deployment ids remain distinct",
+			requested: "ft:gpt-4o-mini:org:job-a",
+			upstream:  "ft:gpt-4o-mini:org:job-b",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "fine tuned date shaped job ids remain distinct",
+			requested: "ft:gpt-4o-mini:org:job",
+			upstream:  "ft:gpt-4o-mini:org:job-20260101",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "untrusted anthropic qualifier is identity bearing",
+			requested: "claude-haiku-4-5",
+			upstream:  "evil.anthropic.claude-haiku-4-5-v1:0",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "anthropic text does not enable revision stripping",
+			requested: "claude-haiku-4-5-anthropic.fake",
+			upstream:  "claude-haiku-4-5-anthropic.fake-v2",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "chained date preview suffix is identity bearing",
+			requested: "gpt-5",
+			upstream:  "gpt-5-20260101-preview",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "chained gemini revision latest is identity bearing",
+			requested: "gemini-1.5-pro",
+			upstream:  "gemini-1.5-pro-002-latest",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "chained gemini date preview is identity bearing",
+			requested: "gemini-2.5-pro",
+			upstream:  "gemini-2.5-pro-20260101-preview",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "chained gemini revision preview is identity bearing",
+			requested: "gemini-1.5-pro",
+			upstream:  "gemini-1.5-pro-002-preview",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "chained latest date is identity bearing",
+			requested: "gpt-5",
+			upstream:  "gpt-5-latest-20260101",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "chained gemini latest date is identity bearing",
+			requested: "gemini-2.5-pro",
+			upstream:  "gemini-2.5-pro-latest-20260101",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "chained gemini revision date is identity bearing",
+			requested: "gemini-1.5-pro",
+			upstream:  "gemini-1.5-pro-002-20260101",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "non terminal claude latest is identity bearing",
+			requested: "claude-3-haiku",
+			upstream:  "claude-latest-3-haiku",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "date-like token is not a snapshot",
+			requested: "gpt-5",
+			upstream:  "gpt-5-2026mini",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "preview-like token is not deployment metadata",
+			requested: "gemini-2.5-pro",
+			upstream:  "gemini-2.5-pro-preview2",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "non gemini preview is identity bearing",
+			requested: "o1",
+			upstream:  "o1-preview",
+			want:      model.ProbeStatusFail,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := ProbeIdentity(spec, IdentityObs{RequestedModel: tt.requested, UpstreamModel: tt.upstream})
+			assert.Equal(t, tt.want, r.Status)
+		})
+	}
+}
+
 func TestProbeCostAnchor(t *testing.T) {
 	spec := model.ProbeSpec{}
 	// no anchor → skip
