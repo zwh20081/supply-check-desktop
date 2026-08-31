@@ -153,6 +153,7 @@ func TestProbeChannelPurityMapsAnalysisToHealthCheckStatus(t *testing.T) {
 	}{
 		{PurityVerdictSingleClean, model.ProbeStatusPass},
 		{PurityVerdictOpaqueSingle, model.ProbeStatusWarn},
+		{PurityVerdictSignatureVariance, model.ProbeStatusWarn},
 		{PurityVerdictTimingVariance, model.ProbeStatusWarn},
 		{PurityVerdictSuspectedBlend, model.ProbeStatusFail},
 		{PurityVerdictWrapped, model.ProbeStatusFail},
@@ -220,4 +221,104 @@ func TestQuality_DiscreteSignatureSplitRemainsHighConfidenceFailure(t *testing.T
 	assert.Equal(t, model.ProbeStatusFail, probe.Status)
 	assert.Equal(t, "discrete_signature_split", probe.Evidence["blend_basis"])
 	assert.Equal(t, "high", probe.Evidence["confidence"])
+}
+
+func TestQuality_MissingFingerprintSingletonIsLowConfidenceWarning(t *testing.T) {
+	// One response can lose optional fingerprint telemetry in transit. The
+	// resulting 9+1 signature shape is worth surfacing, but it is not repeatable
+	// evidence of a second backend.
+	s := make([]PuritySample, 0, 10)
+	for i := 0; i < 9; i++ {
+		s = append(s, PuritySample{
+			FirstChunkMs: 120 + int64(i), PromptTokens: 20,
+			SysFingerprint: "stable-fp", IdScheme: "msg", NamedBackend: "bedrock",
+		})
+	}
+	s = append(s, PuritySample{
+		FirstChunkMs: 129, PromptTokens: 20,
+		SysFingerprint: "", IdScheme: "msg", NamedBackend: "bedrock",
+	})
+
+	analysis := AnalyzePurity(s)
+	require.Equal(t, PurityVerdictSignatureVariance, analysis.Verdict)
+	assert.Equal(t, 2, analysis.Signals["distinct_signatures"])
+	assert.Equal(t, 1, analysis.Signals["repeatable_signatures"])
+	assert.Equal(t, 1, analysis.Signals["singleton_signatures"])
+	assert.Equal(t, 1, analysis.Signals["min_signature_samples"])
+	assert.Equal(t, false, analysis.Signals["discrete_signature_split"])
+	assert.Equal(t, true, analysis.Signals["discrete_signature_anomaly"])
+	assert.Equal(t, "discrete_signature_anomaly", analysis.Signals["blend_basis"])
+	assert.Equal(t, "low", analysis.Signals["confidence"])
+	assert.Equal(t, 90, analysis.Purity)
+
+	probe := ProbeChannelPurity(analysis, 0)
+	assert.Equal(t, model.ProbeStatusWarn, probe.Status)
+	assert.Equal(t, "discrete_signature_anomaly", probe.Evidence["blend_basis"])
+	assert.Equal(t, "low", probe.Evidence["confidence"])
+}
+
+func TestQuality_AllDiscreteSignatureClustersWithTwoPlusSamplesFail(t *testing.T) {
+	// The minority cluster is small but repeats, so both claimed signatures have
+	// the minimum support required for hard discrete-blend evidence.
+	s := make([]PuritySample, 0, 8)
+	for i := 0; i < 6; i++ {
+		s = append(s, PuritySample{
+			FirstChunkMs: 120 + int64(i), PromptTokens: 20,
+			SysFingerprint: "bedrock-fp", IdScheme: "msg", NamedBackend: "bedrock",
+		})
+	}
+	for i := 0; i < 2; i++ {
+		s = append(s, PuritySample{
+			FirstChunkMs: 126 + int64(i), PromptTokens: 21,
+			SysFingerprint: "vertex-fp", IdScheme: "msg", NamedBackend: "vertex",
+		})
+	}
+
+	analysis := AnalyzePurity(s)
+	require.Equal(t, PurityVerdictSuspectedBlend, analysis.Verdict)
+	assert.Equal(t, 2, analysis.Signals["repeatable_signatures"])
+	assert.Equal(t, 0, analysis.Signals["singleton_signatures"])
+	assert.Equal(t, 2, analysis.Signals["min_signature_samples"])
+	assert.Equal(t, true, analysis.Signals["discrete_signature_split"])
+	assert.Equal(t, false, analysis.Signals["discrete_signature_anomaly"])
+	assert.Equal(t, "discrete_signature_split", analysis.Signals["blend_basis"])
+	assert.Equal(t, "high", analysis.Signals["confidence"])
+	assert.Equal(t, 75, analysis.Purity)
+
+	probe := ProbeChannelPurity(analysis, 0)
+	assert.Equal(t, model.ProbeStatusFail, probe.Status)
+}
+
+func TestQuality_SingletonNoiseDoesNotEraseRepeatableSignatureSplit(t *testing.T) {
+	// Two repeatable signatures remain strong evidence even if a third response
+	// loses optional telemetry and forms a one-off noise signature.
+	s := make([]PuritySample, 0, 10)
+	for i := 0; i < 7; i++ {
+		s = append(s, PuritySample{
+			FirstChunkMs: 120 + int64(i), PromptTokens: 20,
+			SysFingerprint: "bedrock-fp", IdScheme: "msg", NamedBackend: "bedrock",
+		})
+	}
+	for i := 0; i < 2; i++ {
+		s = append(s, PuritySample{
+			FirstChunkMs: 127 + int64(i), PromptTokens: 21,
+			SysFingerprint: "vertex-fp", IdScheme: "msg", NamedBackend: "vertex",
+		})
+	}
+	s = append(s, PuritySample{
+		FirstChunkMs: 129, PromptTokens: 20,
+		SysFingerprint: "", IdScheme: "msg", NamedBackend: "bedrock",
+	})
+
+	analysis := AnalyzePurity(s)
+	require.Equal(t, PurityVerdictSuspectedBlend, analysis.Verdict)
+	assert.Equal(t, 2, analysis.Signals["repeatable_signatures"])
+	assert.Equal(t, 1, analysis.Signals["singleton_signatures"])
+	assert.Equal(t, true, analysis.Signals["discrete_signature_split"])
+	assert.Equal(t, false, analysis.Signals["discrete_signature_anomaly"])
+	assert.Equal(t, "discrete_signature_split", analysis.Signals["blend_basis"])
+	assert.Equal(t, "high", analysis.Signals["confidence"])
+
+	probe := ProbeChannelPurity(analysis, 0)
+	assert.Equal(t, model.ProbeStatusFail, probe.Status)
 }

@@ -58,12 +58,13 @@ type PurityResult struct {
 }
 
 const (
-	PurityVerdictSingleClean    = "single_clean"    // one coherent, transparent source
-	PurityVerdictOpaqueSingle   = "opaque_single"   // one source but fully normalized (black box)
-	PurityVerdictSuspectedBlend = "suspected_blend" // ≥2 sources supported by a discrete signature split
-	PurityVerdictTimingVariance = "timing_variance" // multimodal TTFT only; noteworthy, but not proof of a blend
-	PurityVerdictWrapped        = "wrapped"         // repackaged via an agent/IDE subscription
-	PurityVerdictInconclusive   = "inconclusive"    // too few usable samples
+	PurityVerdictSingleClean       = "single_clean"       // one coherent, transparent source
+	PurityVerdictOpaqueSingle      = "opaque_single"      // one source but fully normalized (black box)
+	PurityVerdictSuspectedBlend    = "suspected_blend"    // ≥2 sources supported by a discrete signature split
+	PurityVerdictSignatureVariance = "signature_variance" // a discrete outlier exists, but lacks repeatable support
+	PurityVerdictTimingVariance    = "timing_variance"    // multimodal TTFT only; noteworthy, but not proof of a blend
+	PurityVerdictWrapped           = "wrapped"            // repackaged via an agent/IDE subscription
+	PurityVerdictInconclusive      = "inconclusive"       // too few usable samples
 )
 
 // AnalyzePurity is pure: samples → verdict. Thresholds are conservative to avoid
@@ -128,8 +129,10 @@ func AnalyzePurity(samples []PuritySample) PurityResult {
 	res.Signals["named_backends"] = named
 
 	// --- discrete signature grouping (exact, noise-free) ----------------------
-	// A single backend answering a FIXED prompt returns a stable (prompt_tokens,
-	// fingerprint, id-scheme). Distinct signatures ⇒ ≥2 sources leaked through.
+	// A single backend answering a FIXED prompt normally returns a stable
+	// (prompt_tokens, fingerprint, id-scheme). A repeatable split is evidence of
+	// multiple sources; a singleton is only an anomaly because optional
+	// fingerprint / id telemetry may occasionally be absent.
 	// The key is a struct (not a delimited string) so a raw fingerprint that
 	// happens to contain the delimiter can't collide two backends into one group.
 	sigGroups := map[puritySig][]PuritySample{}
@@ -140,6 +143,10 @@ func AnalyzePurity(samples []PuritySample) PurityResult {
 	distinctPromptTok := distinctInts(ok)
 	res.Signals["distinct_signatures"] = len(sigGroups)
 	res.Signals["distinct_prompt_tokens"] = distinctPromptTok
+	repeatableSignatures, singletonSignatures, minSignatureSamples := signatureSupport(sigGroups)
+	res.Signals["repeatable_signatures"] = repeatableSignatures
+	res.Signals["singleton_signatures"] = singletonSignatures
+	res.Signals["min_signature_samples"] = minSignatureSamples
 
 	// --- timing multimodality (physics; catches normalized blends) ------------
 	ttft := make([]int64, 0, len(ok))
@@ -156,9 +163,15 @@ func AnalyzePurity(samples []PuritySample) PurityResult {
 	// runs). Not a verdict change: we prefer a false-negative over a false alarm.
 	res.Signals["ttft_conclusive"] = len(ttft) >= 4
 
-	blendByDiscrete := len(sigGroups) >= 2
+	// Hard blend evidence requires at least two repeatable signatures. This
+	// prevents one missing optional fingerprint / id from turning an otherwise
+	// coherent 9+1 run into a high-confidence failure, while a noisy singleton
+	// cannot erase a separately supported 7+2 split.
+	blendByDiscrete := repeatableSignatures >= 2
+	discreteAnomaly := len(sigGroups) >= 2 && repeatableSignatures < 2
 	timingMultimodal := ttftClusters >= 2
 	res.Signals["discrete_signature_split"] = blendByDiscrete
+	res.Signals["discrete_signature_anomaly"] = discreteAnomaly
 	res.Signals["timing_multimodal"] = timingMultimodal
 
 	// --- build clusters + purity ----------------------------------------------
@@ -174,6 +187,13 @@ func AnalyzePurity(samples []PuritySample) PurityResult {
 		res.Signals["blend_basis"] = "discrete_signature_split"
 		res.Signals["confidence"] = "high"
 		res.Verdict = PurityVerdictSuspectedBlend
+		res.Clusters, res.Purity = clustersFromSignatures(sigGroups, len(ok))
+	case discreteAnomaly:
+		// Keep the outlier visible and auditable, but do not claim a blend until
+		// every observed signature has repeatable support.
+		res.Signals["blend_basis"] = "discrete_signature_anomaly"
+		res.Signals["confidence"] = "low"
+		res.Verdict = PurityVerdictSignatureVariance
 		res.Clusters, res.Purity = clustersFromSignatures(sigGroups, len(ok))
 	case timingMultimodal:
 		// TTFT modes can come from routing, but also from ordinary queueing,
@@ -219,7 +239,7 @@ func ProbeChannelPurity(analysis PurityResult, failedRequests int) model.ProbeRe
 	switch analysis.Verdict {
 	case PurityVerdictSingleClean:
 		result.Status = model.ProbeStatusPass
-	case PurityVerdictOpaqueSingle, PurityVerdictTimingVariance:
+	case PurityVerdictOpaqueSingle, PurityVerdictSignatureVariance, PurityVerdictTimingVariance:
 		result.Status = model.ProbeStatusWarn
 	case PurityVerdictSuspectedBlend, PurityVerdictWrapped:
 		result.Status = model.ProbeStatusFail
@@ -287,6 +307,25 @@ type puritySig struct {
 	promptTok int
 	fp        string
 	scheme    string
+}
+
+// signatureSupport summarizes which observed discrete signatures are
+// repeatable. The minimum is exposed as evidence so operators can distinguish
+// a supported split from an isolated telemetry glitch.
+func signatureSupport(groups map[puritySig][]PuritySample) (repeatable, singletons, minSamples int) {
+	minSamples = 0
+	for _, samples := range groups {
+		n := len(samples)
+		if minSamples == 0 || n < minSamples {
+			minSamples = n
+		}
+		if n >= 2 {
+			repeatable++
+		} else {
+			singletons++
+		}
+	}
+	return repeatable, singletons, minSamples
 }
 
 func clustersFromSignatures(groups map[puritySig][]PuritySample, total int) ([]PurityCluster, int) {
