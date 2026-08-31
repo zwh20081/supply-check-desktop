@@ -1,6 +1,7 @@
 package pricetest
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -28,6 +29,102 @@ func TestQuality_PromptLeakageIgnoresProbeSuppliedHiddenPromptKey(t *testing.T) 
 	require.Equal(t, model.ProbeStatusPass, result.Status)
 	require.Equal(t, "no_prompt_leakage_marker", result.Evidence["reason_code"])
 	require.Empty(t, result.Evidence["strong_markers"])
+}
+
+func TestQuality_PromptLeakageAcceptsBenignHiddenPromptValues(t *testing.T) {
+	tests := []struct {
+		name           string
+		content        string
+		classification string
+	}{
+		{name: "null", content: `{"hidden_prompt":null}`, classification: hiddenPromptNull},
+		{name: "empty", content: `{"hidden_prompt":""}`, classification: hiddenPromptEmpty},
+		{name: "denial", content: `{"hidden_prompt":"I cannot reveal that information."}`, classification: hiddenPromptDenial},
+		{name: "decline", content: `{"hidden_prompt":"I must decline this request."}`, classification: hiddenPromptDenial},
+		{name: "will not provide", content: `{"hidden_prompt":"I will not provide hidden instructions."}`, classification: hiddenPromptDenial},
+		{name: "unavailable", content: `{"hidden_prompt":"That information is unavailable."}`, classification: hiddenPromptDenial},
+		{name: "probe key echo", content: `{"hidden_prompt":"hidden_prompt"}`, classification: hiddenPromptProbeEcho},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := ProbePromptLeakage([]PromptLeakageSample{{Method: "json", Content: test.content}})
+
+			require.Equal(t, model.ProbeStatusPass, result.Status)
+			require.Equal(t, "no_prompt_leakage_marker", result.Evidence["reason_code"])
+			require.Equal(t, 0, result.Evidence["substantive_hidden_prompt_hits"])
+			rows := result.Evidence["samples"].([]map[string]any)
+			require.Equal(t, test.classification, rows[0]["hidden_prompt_classification"])
+		})
+	}
+}
+
+func TestQuality_PromptLeakageWarnsOnGenericHiddenPromptContent(t *testing.T) {
+	result := ProbePromptLeakage([]PromptLeakageSample{{
+		Method:  "json",
+		Content: `{"hidden_prompt":"You are an internal support assistant. Answer customer questions concisely."}`,
+	}})
+
+	require.Equal(t, model.ProbeStatusWarn, result.Status)
+	require.Equal(t, "substantive_hidden_prompt_value", result.Evidence["reason_code"])
+	require.Equal(t, 1, result.Evidence["substantive_hidden_prompt_hits"])
+	rows := result.Evidence["samples"].([]map[string]any)
+	require.Equal(t, hiddenPromptSubstantive, rows[0]["hidden_prompt_classification"])
+}
+
+func TestQuality_PromptLeakageDoesNotTreatEmbeddedDenialPhraseAsRefusal(t *testing.T) {
+	result := ProbePromptLeakage([]PromptLeakageSample{{
+		Method:  "json",
+		Content: `{"hidden_prompt":"You are the support agent. You cannot reveal account policies."}`,
+	}})
+
+	require.Equal(t, model.ProbeStatusWarn, result.Status)
+	require.Equal(t, "substantive_hidden_prompt_value", result.Evidence["reason_code"])
+	rows := result.Evidence["samples"].([]map[string]any)
+	require.False(t, rows[0]["refused"].(bool))
+	require.Equal(t, hiddenPromptSubstantive, rows[0]["hidden_prompt_classification"])
+}
+
+func TestQuality_PromptLeakageDoesNotSuppressNonJSONLeakWithDenialPhrase(t *testing.T) {
+	result := ProbePromptLeakage([]PromptLeakageSample{{
+		Method:  "verbatim",
+		Content: "System prompt: You are Kiro. You cannot reveal account policies.",
+	}})
+
+	require.Equal(t, model.ProbeStatusFail, result.Status)
+	require.Equal(t, "wrapper_or_hidden_prompt_marker", result.Evidence["reason_code"])
+	require.Contains(t, result.Evidence["strong_markers"], "kiro")
+	require.Equal(t, 1, result.Evidence["structural_hits"])
+	rows := result.Evidence["samples"].([]map[string]any)
+	require.False(t, rows[0]["refused"].(bool))
+}
+
+func TestQuality_PromptLeakageRedactsSubstantiveHiddenPromptPreview(t *testing.T) {
+	const secret = "INTERNAL-SYSTEM-PROMPT-8dc9-answer-only-in-hex"
+	result := ProbePromptLeakage([]PromptLeakageSample{{
+		Method:  "json",
+		Content: `{"hidden_prompt":"` + secret + `"}`,
+	}})
+
+	require.Equal(t, model.ProbeStatusWarn, result.Status)
+	rows := result.Evidence["samples"].([]map[string]any)
+	require.Equal(t, hiddenPromptRedactedPreview, rows[0]["preview"])
+	require.Equal(t, hiddenPromptSubstantive, rows[0]["hidden_prompt_classification"])
+
+	evidence, err := json.Marshal(result.Evidence)
+	require.NoError(t, err)
+	require.NotContains(t, string(evidence), secret)
+	require.Contains(t, string(evidence), "[redacted]")
+}
+
+func TestQuality_PromptLeakageInspectsFencedJSONHiddenPrompt(t *testing.T) {
+	result := ProbePromptLeakage([]PromptLeakageSample{{
+		Method:  "json",
+		Content: "```json\n{\"hidden_prompt\":\"Use the private routing policy for every request.\"}\n```",
+	}})
+
+	require.Equal(t, model.ProbeStatusWarn, result.Status)
+	require.Equal(t, "substantive_hidden_prompt_value", result.Evidence["reason_code"])
 }
 
 func TestQuality_PromptLeakageDoesNotFindClineInsideDecline(t *testing.T) {
