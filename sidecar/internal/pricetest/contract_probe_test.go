@@ -229,6 +229,32 @@ func TestQuality_ObservedBlankToolNameIsNameMismatch(t *testing.T) {
 	require.Equal(t, "tool_name_mismatch", result.Evidence["reason_code"])
 }
 
+func TestQuality_UnexpectedToolNameIsHashedBeforeEvidence(t *testing.T) {
+	const secretName = "INTERNAL-POLICY-TOOL-8f34-route-private"
+	observation := ToolSchemaFidelityObs{
+		ToolCallObserved: true, ToolName: secretName, ArgumentsCaptured: true,
+		ArgumentsRaw: []byte(`{"value":"probe-ok"}`), ArgumentsValidJSON: true, SchemaMatched: true,
+	}
+	first := ProbeToolSchemaFidelity(observation)
+	second := ProbeToolSchemaFidelity(observation)
+
+	require.Equal(t, model.ProbeStatusFail, first.Status)
+	require.Equal(t, "tool_name_mismatch", first.Evidence["reason_code"])
+	require.Equal(t, first.Evidence["tool_name"], second.Evidence["tool_name"], "hash handle must be stable")
+	require.Regexp(t, `^tool_sha256_[0-9a-f]{12}$`, first.Evidence["tool_name"])
+	require.Equal(t, len(secretName), first.Evidence["tool_name_length"])
+
+	encoded, err := json.Marshal(first.Evidence)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), secretName)
+
+	valid := ProbeToolSchemaFidelity(ToolSchemaFidelityObs{
+		ToolCallObserved: true, ToolName: "healthcheck_echo", ArgumentsCaptured: true,
+		ArgumentsRaw: []byte(`{"value":"probe-ok"}`), ArgumentsValidJSON: true, SchemaMatched: true,
+	})
+	require.Equal(t, "healthcheck_echo", valid.Evidence["tool_name"])
+}
+
 func TestProbeRateLimitContractIsPassiveAndValidatesRetryAfter(t *testing.T) {
 	unsupported := ProbeRateLimitContract(RateLimitContractObs{HTTPStatus: 429})
 	require.Equal(t, model.ProbeStatusSkip, unsupported.Status, "a natural 429 without contract headers is unsupported, not guilt")

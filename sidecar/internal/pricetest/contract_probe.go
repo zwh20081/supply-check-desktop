@@ -225,12 +225,15 @@ func ProbeToolSchemaFidelity(obs ToolSchemaFidelityObs) model.ProbeResult {
 		ProbeKey: "p14_tool_schema_fidelity", Kind: model.ProbeKindToolSchemaFidelity,
 		Evidence: map[string]any{
 			"tool_call_observed": obs.ToolCallObserved,
-			"tool_name":          contractEvidenceText(obs.ToolName),
+			"tool_name":          sanitizedObservedToolName(obs.ToolName),
 			"arguments_captured": obs.ArgumentsCaptured,
 			"arguments_valid":    argumentsValid,
 			"schema_matched":     schemaMatched,
 			"expected_contract":  healthcheckToolContractEvidence(),
 		},
+	}
+	if obs.ToolName != "" && obs.ToolName != "healthcheck_echo" {
+		result.Evidence["tool_name_length"] = utf8.RuneCountInString(obs.ToolName)
 	}
 	if obs.ArgumentsCaptured {
 		result.Evidence["actual_arguments"] = diagnosis.Actual
@@ -264,6 +267,16 @@ func ProbeToolSchemaFidelity(obs ToolSchemaFidelityObs) model.ProbeResult {
 	}
 	result.Status = model.ProbeStatusPass
 	return result
+}
+
+func sanitizedObservedToolName(value string) string {
+	if value == "" || value == "healthcheck_echo" {
+		return value
+	}
+	// An unexpected name is an untrusted model-controlled value. Preserve a
+	// stable correlation handle without copying arbitrary text into evidence.
+	digest := sha256.Sum256([]byte(value))
+	return "tool_sha256_" + hex.EncodeToString(digest[:6])
 }
 
 func healthcheckToolContractEvidence() map[string]any {
