@@ -54,6 +54,11 @@ func ProbeTokenCount(spec model.ProbeSpec, obs TokenCountObs) model.ProbeResult 
 		"fail_pct":               failPct,
 		"openai_family":          obs.IsOpenAIFamily,
 	}
+	if obs.IsOpenAIFamily {
+		res.Evidence["comparison_confidence"] = "exact_tokenizer_family"
+	} else {
+		res.Evidence["comparison_confidence"] = "estimated_cross_tokenizer"
+	}
 	switch {
 	case overPct >= failPct && obs.IsOpenAIFamily:
 		res.Status = model.ProbeStatusFail
@@ -61,6 +66,9 @@ func ProbeTokenCount(spec model.ProbeSpec, obs TokenCountObs) model.ProbeResult 
 		// Non-OpenAI families never FAIL on token count (tokenizer is an
 		// estimate); they cap at WARN even past the fail band.
 		res.Status = model.ProbeStatusWarn
+		if !obs.IsOpenAIFamily {
+			res.Evidence["reason_code"] = "non_openai_tokenizer_estimate"
+		}
 	default:
 		res.Status = model.ProbeStatusPass
 	}
@@ -98,12 +106,18 @@ func ProbeLength(spec model.ProbeSpec, obs LengthObs) model.ProbeResult {
 		"content_ok":        obs.ContentOK,
 		"openai_family":     obs.IsOpenAIFamily,
 	}
+	if obs.IsOpenAIFamily {
+		res.Evidence["comparison_confidence"] = "exact_tokenizer_family"
+	} else {
+		res.Evidence["comparison_confidence"] = "estimated_cross_tokenizer"
+	}
 	switch {
 	case ratio > 1+tol && obs.IsOpenAIFamily:
 		res.Status = model.ProbeStatusFail // server-side padding of completion tokens
 	case ratio > 1+tol:
 		// Non-OpenAI tokenizer mismatch — flag but don't convict.
 		res.Status = model.ProbeStatusWarn
+		res.Evidence["reason_code"] = "non_openai_tokenizer_estimate"
 	case !obs.ContentOK:
 		res.Status = model.ProbeStatusWarn
 	default:

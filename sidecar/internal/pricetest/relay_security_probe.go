@@ -28,9 +28,11 @@ var refusalMarkers = []string{
 	"無法提供", "不能提供", "無法透露", "不能透露", "不會透露", "無法存取",
 }
 
-var wrapperLeakMarkers = []string{
-	"kiro", "cursor", "cline", "windsurf", "antigravity", "hidden_prompt",
-}
+// hidden_prompt is deliberately absent: the JSON probe itself asks the model
+// to use that key, so its presence says nothing about whether the value leaked.
+// Word boundaries keep wrapper names meaningful (for example, "decline" must
+// not be classified as a Cline wrapper disclosure).
+var wrapperLeakPattern = regexp.MustCompile(`(?i)\b(kiro|cursor|cline|windsurf|antigravity)\b`)
 
 func ProbePromptLeakage(samples []PromptLeakageSample) model.ProbeResult {
 	result := model.ProbeResult{
@@ -54,8 +56,8 @@ func ProbePromptLeakage(samples []PromptLeakageSample) model.ProbeResult {
 		refused := containsAnyString(lower, refusalMarkers...)
 		row["refused"] = refused
 		row["preview"] = safePreview(content, 320)
-		for _, marker := range wrapperLeakMarkers {
-			if strings.Contains(lower, marker) && !refused {
+		if !refused {
+			for _, marker := range wrapperLeakPattern.FindAllString(lower, -1) {
 				strongHits = appendUnique(strongHits, marker)
 			}
 		}

@@ -40,7 +40,7 @@ func TestProbeCacheRateUsesAnthropicTotalInputDenominator(t *testing.T) {
 	require.Equal(t, 8202, result.Evidence["cold_total_input_tokens"])
 }
 
-func TestProbeCacheRateSeparatesUnsupportedZeroAndReplay(t *testing.T) {
+func TestProbeCacheRateSeparatesUnsupportedZeroAndMarkerMismatch(t *testing.T) {
 	unsupported := make([]CacheRateSample, 0, 4)
 	for _, role := range []string{"cold", "cold", "warm", "warm"} {
 		unsupported = append(unsupported, CacheRateSample{Role: role, PromptTokens: 100, MarkerMatch: true})
@@ -57,6 +57,37 @@ func TestProbeCacheRateSeparatesUnsupportedZeroAndReplay(t *testing.T) {
 
 	unsupported[3].MarkerMatch = false
 	result = ProbeCacheRate(unsupported, 2, 1, 8000)
+	require.Equal(t, model.ProbeStatusWarn, result.Status)
+	require.Equal(t, "expected_marker_missing", result.Evidence["reason_code"])
+}
+
+func TestQuality_CacheRateMarkerMismatchDoesNotClaimReplay(t *testing.T) {
+	samples := []CacheRateSample{
+		{PromptID: "A", Role: "cold", PromptTokens: 1000, TelemetryReported: true, MarkerMatch: true},
+		{PromptID: "B", Role: "cold", PromptTokens: 1000, TelemetryReported: true, MarkerMatch: true},
+		{PromptID: "A", Role: "warm", PromptTokens: 1000, CachedTokens: 800, TelemetryReported: true, MarkerMatch: true},
+		{PromptID: "B", Role: "warm", PromptTokens: 1000, CachedTokens: 800, TelemetryReported: true, MarkerMatch: false},
+	}
+
+	result := ProbeCacheRate(samples, 2, 1, 8000)
+	require.Equal(t, model.ProbeStatusWarn, result.Status)
+	require.Equal(t, "expected_marker_missing", result.Evidence["reason_code"])
+	require.Equal(t, 1, result.Evidence["marker_mismatch_samples"])
+	require.Equal(t, []string{"B"}, result.Evidence["marker_mismatch_prompts"])
+	require.NotEqual(t, "rotated_prompt_replay", result.Evidence["reason_code"])
+}
+
+func TestQuality_CacheRateRequiresObservedAlternateMarkerForReplay(t *testing.T) {
+	samples := []CacheRateSample{
+		{PromptID: "A", Role: "cold", PromptTokens: 1000, TelemetryReported: true, MarkerMatch: true},
+		{PromptID: "B", Role: "cold", PromptTokens: 1000, TelemetryReported: true, MarkerMatch: true},
+		{PromptID: "A", Role: "warm", PromptTokens: 1000, CachedTokens: 800, TelemetryReported: true, MarkerMatch: false, ObservedPromptID: "B"},
+		{PromptID: "B", Role: "warm", PromptTokens: 1000, CachedTokens: 800, TelemetryReported: true, MarkerMatch: true},
+	}
+
+	result := ProbeCacheRate(samples, 2, 1, 8000)
 	require.Equal(t, model.ProbeStatusFail, result.Status)
 	require.Equal(t, "rotated_prompt_replay", result.Evidence["reason_code"])
+	require.Equal(t, "A", result.Evidence["expected_prompt"])
+	require.Equal(t, "B", result.Evidence["observed_prompt"])
 }

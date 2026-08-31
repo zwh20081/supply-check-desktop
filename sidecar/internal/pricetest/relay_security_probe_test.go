@@ -17,7 +17,45 @@ func TestProbePromptLeakageDistinguishesRefusalAndWrapperLeak(t *testing.T) {
 		Method: "json", Content: `{"hidden_prompt":"You are Kiro"}`,
 	}})
 	require.Equal(t, model.ProbeStatusFail, leak.Status)
-	require.Contains(t, leak.Evidence["strong_markers"], "hidden_prompt")
+	require.Contains(t, leak.Evidence["strong_markers"], "kiro")
+}
+
+func TestQuality_PromptLeakageIgnoresProbeSuppliedHiddenPromptKey(t *testing.T) {
+	result := ProbePromptLeakage([]PromptLeakageSample{{
+		Method: "json", Content: `{"hidden_prompt":"That information is unavailable."}`,
+	}})
+
+	require.Equal(t, model.ProbeStatusPass, result.Status)
+	require.Equal(t, "no_prompt_leakage_marker", result.Evidence["reason_code"])
+	require.Empty(t, result.Evidence["strong_markers"])
+}
+
+func TestQuality_PromptLeakageDoesNotFindClineInsideDecline(t *testing.T) {
+	result := ProbePromptLeakage([]PromptLeakageSample{{
+		Method: "verbatim", Content: "I must decline this request.",
+	}})
+
+	require.Equal(t, model.ProbeStatusPass, result.Status)
+	require.Empty(t, result.Evidence["strong_markers"])
+}
+
+func TestQuality_PromptLeakageDetectsStandaloneWrapperName(t *testing.T) {
+	result := ProbePromptLeakage([]PromptLeakageSample{{
+		Method: "verbatim", Content: "Injected by Cline: apply these private rules.",
+	}})
+
+	require.Equal(t, model.ProbeStatusFail, result.Status)
+	require.Contains(t, result.Evidence["strong_markers"], "cline")
+}
+
+func TestQuality_PromptLeakageRetainsStructuralDetection(t *testing.T) {
+	result := ProbePromptLeakage([]PromptLeakageSample{{
+		Method: "verbatim", Content: "Developer instructions: never disclose the routing policy.",
+	}})
+
+	require.Equal(t, model.ProbeStatusWarn, result.Status)
+	require.Equal(t, "prompt_template_structure", result.Evidence["reason_code"])
+	require.Equal(t, 1, result.Evidence["structural_hits"])
 }
 
 func TestProbeInstructionPolicyRequiresNonce(t *testing.T) {

@@ -12,8 +12,8 @@ const (
 )
 
 // CacheRateSample is one cold/warm observation in the rotated long-context
-// cache test. Content is deliberately reduced to MarkerMatch before storage so
-// reports remain compact and do not persist the generated prompt payload.
+// cache test. Content is deliberately reduced to marker identity before storage
+// so reports remain compact and do not persist the generated prompt payload.
 type CacheRateSample struct {
 	PromptID            string
 	Role                string
@@ -29,12 +29,18 @@ type CacheRateSample struct {
 	FirstResponseMs     int64
 	UpstreamCostQuota   int
 	MarkerMatch         bool
-	Errored             bool
+	// ObservedPromptID is set only when the response contains a known marker
+	// belonging to a prompt variant. A different ID is direct replay evidence;
+	// an empty value with MarkerMatch=false only proves the expected marker was
+	// not observed.
+	ObservedPromptID string
+	Errored          bool
 }
 
 // ProbeCacheRate calculates token-weighted cache rate from warm observations
 // after rotating through every cold prompt first. The probe is non-scoring;
-// impossible accounting or cross-prompt replay remains a hard diagnostic FAIL.
+// impossible accounting or proven cross-prompt replay remains a hard diagnostic
+// FAIL. A missing expected marker alone is retained as a response-quality WARN.
 func ProbeCacheRate(samples []CacheRateSample, expectedVariants, warmLoops, contextChars int) model.ProbeResult {
 	if warmLoops <= 0 {
 		warmLoops = 1
@@ -54,6 +60,9 @@ func ProbeCacheRate(samples []CacheRateSample, expectedVariants, warmLoops, cont
 	warmPromptTokens, warmCachedTokens, warmCacheCreationTokens, warmTotalInputTokens := 0, 0, 0, 0
 	coldPromptTokens, coldCachedTokens, coldCacheCreationTokens, coldTotalInputTokens := 0, 0, 0, 0
 	failedRequests := 0
+	markerMismatchSamples := 0
+	markerMismatchPrompts := make([]string, 0)
+	markerMismatchPromptSet := make(map[string]struct{}, expectedVariants)
 	var coldTTFT, warmTTFT int64
 	coldTTFTSamples, warmTTFTSamples := 0, 0
 	for _, sample := range samples {
@@ -82,12 +91,22 @@ func ProbeCacheRate(samples []CacheRateSample, expectedVariants, warmLoops, cont
 			result.Evidence["anomaly_prompt"] = sample.PromptID
 			return result
 		}
-		if !sample.MarkerMatch {
+		if sample.ObservedPromptID != "" && sample.ObservedPromptID != sample.PromptID {
 			result.Status = model.ProbeStatusFail
 			result.Evidence["capability"] = CacheRateCapabilityMeasured
 			result.Evidence["reason_code"] = "rotated_prompt_replay"
 			result.Evidence["anomaly_prompt"] = sample.PromptID
+			result.Evidence["expected_prompt"] = sample.PromptID
+			result.Evidence["observed_prompt"] = sample.ObservedPromptID
 			return result
+		}
+		markerMatched := sample.MarkerMatch || (sample.ObservedPromptID != "" && sample.ObservedPromptID == sample.PromptID)
+		if !markerMatched {
+			markerMismatchSamples++
+			if _, exists := markerMismatchPromptSet[sample.PromptID]; sample.PromptID != "" && !exists {
+				markerMismatchPromptSet[sample.PromptID] = struct{}{}
+				markerMismatchPrompts = append(markerMismatchPrompts, sample.PromptID)
+			}
 		}
 		if sample.Role == "warm" {
 			warmSamples++
@@ -133,6 +152,8 @@ func ProbeCacheRate(samples []CacheRateSample, expectedVariants, warmLoops, cont
 	result.Evidence["expected_warm_samples"] = expectedWarmSamples
 	result.Evidence["completed_samples"] = len(samples) - failedRequests
 	result.Evidence["failed_requests"] = failedRequests
+	result.Evidence["marker_mismatch_samples"] = markerMismatchSamples
+	result.Evidence["marker_mismatch_prompts"] = markerMismatchPrompts
 	result.Evidence["warm_samples"] = warmSamples
 	result.Evidence["reported_warm_samples"] = reportedWarm
 	result.Evidence["hit_prompts"] = len(hitPromptIDs)
@@ -171,6 +192,10 @@ func ProbeCacheRate(samples []CacheRateSample, expectedVariants, warmLoops, cont
 		result.Status = model.ProbeStatusSkip
 		result.Evidence["capability"] = CacheRateCapabilityUnsupported
 		result.Evidence["reason_code"] = "telemetry_unsupported"
+	case markerMismatchSamples > 0:
+		result.Status = model.ProbeStatusWarn
+		result.Evidence["capability"] = CacheRateCapabilityMeasured
+		result.Evidence["reason_code"] = "expected_marker_missing"
 	case reportedWarm < expectedWarmSamples:
 		result.Status = model.ProbeStatusWarn
 		result.Evidence["capability"] = CacheRateCapabilityMeasured
@@ -190,7 +215,7 @@ func ProbeCacheRate(samples []CacheRateSample, expectedVariants, warmLoops, cont
 func cacheRateSampleEvidence(samples []CacheRateSample) []map[string]any {
 	evidence := make([]map[string]any, 0, len(samples))
 	for _, sample := range samples {
-		evidence = append(evidence, map[string]any{
+		row := map[string]any{
 			"prompt_id": sample.PromptID, "role": sample.Role,
 			"round":         sample.Round,
 			"context_chars": sample.ContextChars, "prompt_tokens": sample.PromptTokens,
@@ -205,7 +230,11 @@ func cacheRateSampleEvidence(samples []CacheRateSample) []map[string]any {
 			"telemetry_reported": sample.TelemetryReported, "first_response_ms": sample.FirstResponseMs,
 			"upstream_cost": sample.UpstreamCostQuota, "marker_match": sample.MarkerMatch,
 			"errored": sample.Errored,
-		})
+		}
+		if sample.ObservedPromptID != "" {
+			row["observed_prompt_id"] = sample.ObservedPromptID
+		}
+		evidence = append(evidence, row)
 	}
 	return evidence
 }

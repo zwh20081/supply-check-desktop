@@ -198,6 +198,27 @@ func TestProbeTokenCount_Bands(t *testing.T) {
 	assert.Equal(t, model.ProbeStatusWarn, r.Status)
 }
 
+func TestQuality_NonOpenAITokenWarningsExposeEstimatorLimits(t *testing.T) {
+	prompt := ProbeTokenCount(model.ProbeSpec{}, TokenCountObs{
+		UpstreamPromptTokens: 170,
+		LocalPromptTokens:    100,
+		IsOpenAIFamily:       false,
+	})
+	assert.Equal(t, model.ProbeStatusWarn, prompt.Status)
+	assert.Equal(t, "estimated_cross_tokenizer", prompt.Evidence["comparison_confidence"])
+	assert.Equal(t, "non_openai_tokenizer_estimate", prompt.Evidence["reason_code"])
+
+	completion := ProbeLength(model.ProbeSpec{}, LengthObs{
+		CompletionTokens: 170,
+		LocalRecount:     100,
+		ContentOK:        true,
+		IsOpenAIFamily:   false,
+	})
+	assert.Equal(t, model.ProbeStatusWarn, completion.Status)
+	assert.Equal(t, "estimated_cross_tokenizer", completion.Evidence["comparison_confidence"])
+	assert.Equal(t, "non_openai_tokenizer_estimate", completion.Evidence["reason_code"])
+}
+
 func TestProbeIdentity_FamilyMatch(t *testing.T) {
 	spec := model.ProbeSpec{}
 	// echoed dated id, same family → pass
