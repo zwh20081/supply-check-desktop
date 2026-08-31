@@ -63,6 +63,11 @@ type Observation struct {
 	ToolArgumentsValid          bool              `json:"toolArgumentsValid"`
 	ToolSchemaMatched           bool              `json:"toolSchemaMatched"`
 	ProviderCacheControlApplied []string          `json:"providerCacheControlApplied,omitempty"`
+	// ToolArgumentsRaw is intentionally process-local. Tool payloads are untrusted
+	// and may contain credentials echoed by a model, so they must never cross the
+	// protocol boundary or be serialized into a report without redaction.
+	ToolArgumentsCaptured bool   `json:"toolArgumentsCaptured"`
+	ToolArgumentsRaw      []byte `json:"-"`
 }
 
 type ProbeResult struct {

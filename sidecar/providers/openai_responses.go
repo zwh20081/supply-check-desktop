@@ -162,11 +162,7 @@ func applyResponsesToolObservation(observation *protocol.Observation, response *
 			continue
 		}
 		call := item.AsFunctionCall()
-		observed, matched := validateHealthcheckTool(call.Name, []byte(call.Arguments))
-		observation.ToolCallObserved = observed
-		observation.ToolCallName = call.Name
-		observation.ToolArgumentsValid = observed
-		observation.ToolSchemaMatched = matched
+		applyHealthcheckToolObservation(observation, call.Name, []byte(call.Arguments))
 		return
 	}
 }

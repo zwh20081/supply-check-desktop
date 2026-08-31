@@ -1,11 +1,13 @@
 package pricetest
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"supply-check-sdk/internal/model"
+	"supply-check-sdk/protocol"
 )
 
 func TestProbeProtocolContract(t *testing.T) {
@@ -115,6 +117,116 @@ func TestProbeToolSchemaFidelitySeparatesUnsupportedFromMalformed(t *testing.T) 
 	})
 	require.Equal(t, model.ProbeStatusFail, malformed.Status)
 	require.Equal(t, "tool_arguments_malformed", malformed.Evidence["reason_code"])
+}
+
+func TestQuality_ToolSchemaDiagnosticsClassifyMissingWrongValueAndExtraFields(t *testing.T) {
+	tests := []struct {
+		name            string
+		raw             string
+		reason          string
+		diagnosticField string
+		diagnosticValue []string
+	}{
+		{name: "missing", raw: `{}`, reason: "tool_schema_missing_required", diagnosticField: "missing_fields", diagnosticValue: []string{"value"}},
+		{name: "wrong value", raw: `{"value":"probe-no"}`, reason: "tool_schema_wrong_value", diagnosticField: "wrong_value_fields", diagnosticValue: []string{"value"}},
+		{name: "extra", raw: `{"value":"probe-ok","unexpected":"sk-supersecret123456"}`, reason: "tool_schema_extra_fields", diagnosticField: "extra_fields", diagnosticValue: []string{sanitizedToolFieldName("unexpected")}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := ProbeToolSchemaFidelity(ToolSchemaFidelityObs{
+				ToolCallObserved: true, ToolName: "healthcheck_echo", ArgumentsCaptured: true,
+				ArgumentsRaw: []byte(test.raw), ArgumentsValidJSON: true,
+			})
+			require.Equal(t, model.ProbeStatusFail, result.Status)
+			require.Equal(t, test.reason, result.Evidence["reason_code"])
+			diagnostics := result.Evidence["schema_diagnostics"].(map[string]any)
+			require.Equal(t, test.diagnosticValue, diagnostics[test.diagnosticField])
+			encoded, err := json.Marshal(result.Evidence)
+			require.NoError(t, err)
+			require.NotContains(t, string(encoded), "probe-no")
+			require.NotContains(t, string(encoded), "sk-supersecret")
+		})
+	}
+}
+
+func TestQuality_ToolSchemaEvidenceContainsExpectedContractAndSanitizedActual(t *testing.T) {
+	result := ProbeToolSchemaFidelity(ToolSchemaFidelityObs{
+		ToolCallObserved: true, ToolName: "healthcheck_echo", ArgumentsCaptured: true,
+		ArgumentsRaw: []byte(`{"value":"probe-ok"}`), ArgumentsValidJSON: true, SchemaMatched: true,
+	})
+	require.Equal(t, model.ProbeStatusPass, result.Status)
+
+	expected := result.Evidence["expected_contract"].(map[string]any)
+	require.Equal(t, "healthcheck_echo", expected["tool_name"])
+	arguments := expected["arguments"].(map[string]any)
+	require.Equal(t, []string{"value"}, arguments["required"])
+	require.Equal(t, false, arguments["additional_properties"])
+
+	actual := result.Evidence["actual_arguments"].(map[string]any)
+	require.Equal(t, "object", actual["root_type"])
+	fields := actual["fields"].(map[string]any)
+	value := fields["value"].(map[string]any)
+	require.Equal(t, "probe-ok", value["value"])
+	require.Equal(t, true, result.Evidence["provider_signal_consistent"])
+}
+
+func TestQuality_ToolSchemaEvidenceRedactsSecretFieldNames(t *testing.T) {
+	secretField := "sk-field-secret123456"
+	raw, err := json.Marshal(map[string]any{"value": "probe-ok", secretField: "also-secret"})
+	require.NoError(t, err)
+	result := ProbeToolSchemaFidelity(ToolSchemaFidelityObs{
+		ToolCallObserved: true, ToolName: "healthcheck_echo", ArgumentsCaptured: true,
+		ArgumentsRaw: raw, ArgumentsValidJSON: true,
+	})
+	require.Equal(t, "tool_schema_extra_fields", result.Evidence["reason_code"])
+	diagnostics := result.Evidence["schema_diagnostics"].(map[string]any)
+	extraFields := diagnostics["extra_fields"].([]string)
+	require.Len(t, extraFields, 1)
+	require.Equal(t, 1, diagnostics["extra_field_count"])
+	require.Regexp(t, `^field_sha256_[0-9a-f]{12}$`, extraFields[0])
+
+	encoded, err := json.Marshal(result.Evidence)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), secretField)
+	require.NotContains(t, string(encoded), "also-secret")
+}
+
+func TestQuality_ToolSchemaDiagnosticsDistinguishWrongTypeAndRootType(t *testing.T) {
+	wrongType := ProbeToolSchemaFidelity(ToolSchemaFidelityObs{
+		ToolCallObserved: true, ToolName: "healthcheck_echo", ArgumentsCaptured: true,
+		ArgumentsRaw: []byte(`{"value":42}`), ArgumentsValidJSON: true,
+	})
+	require.Equal(t, "tool_schema_wrong_type", wrongType.Evidence["reason_code"])
+	diagnostics := wrongType.Evidence["schema_diagnostics"].(map[string]any)
+	require.Equal(t, []string{"value"}, diagnostics["wrong_type_fields"])
+
+	wrongRoot := ProbeToolSchemaFidelity(ToolSchemaFidelityObs{
+		ToolCallObserved: true, ToolName: "healthcheck_echo", ArgumentsCaptured: true,
+		ArgumentsRaw: []byte(`["probe-ok"]`), ArgumentsValidJSON: true,
+	})
+	require.Equal(t, "tool_arguments_not_object", wrongRoot.Evidence["reason_code"])
+	diagnostics = wrongRoot.Evidence["schema_diagnostics"].(map[string]any)
+	require.Equal(t, []string{"root_type_mismatch"}, diagnostics["issue_codes"])
+}
+
+func TestQuality_ToolArgumentsRawNeverCrossesProtocolJSONBoundary(t *testing.T) {
+	secret := `{"value":"sk-supersecret123456"}`
+	encoded, err := json.Marshal(protocol.Observation{
+		ToolCallObserved: true, ToolArgumentsCaptured: true, ToolArgumentsRaw: []byte(secret),
+	})
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "sk-supersecret")
+	require.NotContains(t, string(encoded), "toolArgumentsRaw")
+	require.Contains(t, string(encoded), `"toolArgumentsCaptured":true`)
+}
+
+func TestQuality_ObservedBlankToolNameIsNameMismatch(t *testing.T) {
+	result := ProbeToolSchemaFidelity(ToolSchemaFidelityObs{
+		ToolCallObserved: true, ToolName: "", ArgumentsCaptured: true,
+		ArgumentsRaw: []byte(`{"value":"probe-ok"}`), ArgumentsValidJSON: true, SchemaMatched: true,
+	})
+	require.Equal(t, model.ProbeStatusFail, result.Status)
+	require.Equal(t, "tool_name_mismatch", result.Evidence["reason_code"])
 }
 
 func TestProbeRateLimitContractIsPassiveAndValidatesRetryAfter(t *testing.T) {

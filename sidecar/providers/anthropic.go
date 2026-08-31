@@ -2,7 +2,6 @@ package providers
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -60,8 +59,9 @@ func anthropicParams(request protocol.Request) anthropic.MessageNewParams {
 	}
 	if request.ToolContract {
 		schema := anthropic.ToolInputSchemaParam{
-			Properties: map[string]any{"value": map[string]any{"type": "string", "const": "probe-ok"}},
-			Required:   []string{"value"},
+			Properties:  map[string]any{"value": map[string]any{"type": "string", "const": "probe-ok"}},
+			Required:    []string{"value"},
+			ExtraFields: map[string]any{"additionalProperties": false},
 		}
 		params.Tools = []anthropic.ToolUnionParam{anthropic.ToolUnionParamOfTool(schema, "healthcheck_echo")}
 		params.ToolChoice = anthropic.ToolChoiceParamOfTool("healthcheck_echo")
@@ -146,12 +146,7 @@ func applyAnthropicToolObservation(observation *protocol.Observation, blocks []a
 		if block.Type != "tool_use" {
 			continue
 		}
-		observed, matched := validateHealthcheckTool(block.Name, block.Input)
-		observation.ToolCallObserved = observed
-		observation.ToolCallName = block.Name
-		var decoded map[string]any
-		observation.ToolArgumentsValid = json.Unmarshal(block.Input, &decoded) == nil
-		observation.ToolSchemaMatched = matched
+		applyHealthcheckToolObservation(observation, block.Name, block.Input)
 		return
 	}
 }

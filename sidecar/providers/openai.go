@@ -158,11 +158,7 @@ func applyOpenAIToolObservation(observation *protocol.Observation, calls []opena
 		return
 	}
 	call := calls[0].AsFunction()
-	observed, matched := validateHealthcheckTool(call.Function.Name, []byte(call.Function.Arguments))
-	observation.ToolCallObserved = observed
-	observation.ToolCallName = call.Function.Name
-	observation.ToolArgumentsValid = observed
-	observation.ToolSchemaMatched = matched
+	applyHealthcheckToolObservation(observation, call.Function.Name, []byte(call.Function.Arguments))
 }
 
 func isOpenAIReasoningModel(model string) bool {

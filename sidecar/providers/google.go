@@ -67,11 +67,12 @@ func googleConfig(request protocol.Request) *genai.GenerateContentConfig {
 		config.SystemInstruction = &genai.Content{Role: "system", Parts: []*genai.Part{{Text: request.SystemPrompt}}}
 	}
 	if request.ToolContract {
+		maxProperties := int64(1)
 		config.Tools = []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{
 			Name: "healthcheck_echo", Description: "Echo the exact supplied health check value.",
 			Parameters: &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{
 				"value": {Type: genai.TypeString, Enum: []string{"probe-ok"}},
-			}, Required: []string{"value"}},
+			}, Required: []string{"value"}, MaxProperties: &maxProperties},
 		}}}}
 		config.ToolConfig = &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{
 			Mode: genai.FunctionCallingConfigModeAny, AllowedFunctionNames: []string{"healthcheck_echo"},
@@ -164,12 +165,8 @@ func applyGoogleToolObservation(observation *protocol.Observation, calls []*gena
 	if len(calls) == 0 || calls[0] == nil {
 		return
 	}
-	raw, err := json.Marshal(calls[0].Args)
-	observed, matched := validateHealthcheckTool(calls[0].Name, raw)
-	observation.ToolCallObserved = observed
-	observation.ToolCallName = calls[0].Name
-	observation.ToolArgumentsValid = err == nil
-	observation.ToolSchemaMatched = matched
+	raw, _ := json.Marshal(calls[0].Args)
+	applyHealthcheckToolObservation(observation, calls[0].Name, raw)
 }
 
 func supportsGenerateContent(model *genai.Model) bool {

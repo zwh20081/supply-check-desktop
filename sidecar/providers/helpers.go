@@ -34,16 +34,29 @@ func streamTiming(started time.Time, contentAt []time.Time) (uint64, float64) {
 	return first, intervals[middle]
 }
 
-func validateHealthcheckTool(name string, raw []byte) (bool, bool) {
-	if name == "" {
+func validateHealthcheckTool(raw []byte) (bool, bool) {
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return false, false
 	}
-	var args map[string]any
-	if err := json.Unmarshal(raw, &args); err != nil {
+	args, ok := decoded.(map[string]any)
+	if !ok {
 		return true, false
 	}
 	value, ok := args["value"].(string)
-	return true, ok && value == "probe-ok"
+	return true, ok && value == "probe-ok" && len(args) == 1
+}
+
+func applyHealthcheckToolObservation(observation *protocol.Observation, name string, raw []byte) {
+	valid, matched := validateHealthcheckTool(raw)
+	observation.ToolCallObserved = true
+	observation.ToolCallName = name
+	observation.ToolArgumentsCaptured = true
+	// Copy the SDK-owned buffer so streamed/final response reuse cannot mutate the
+	// diagnostic input. The protocol type prevents this raw value being serialized.
+	observation.ToolArgumentsRaw = append([]byte(nil), raw...)
+	observation.ToolArgumentsValid = valid
+	observation.ToolSchemaMatched = matched
 }
 
 func nonNegative(value int64) uint64 {

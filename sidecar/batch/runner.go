@@ -191,6 +191,7 @@ func (r *runner) runModel(ctx context.Context, modelName string, index, totalMod
 	} else {
 		state.results = append(state.results, pricetest.ProbeToolSchemaFidelity(pricetest.ToolSchemaFidelityObs{
 			ToolCallObserved: toolObs.ToolCallObserved, ToolName: toolObs.ToolCallName,
+			ArgumentsCaptured: toolObs.ToolArgumentsCaptured, ArgumentsRaw: toolObs.ToolArgumentsRaw,
 			ArgumentsValidJSON: toolObs.ToolArgumentsValid, SchemaMatched: toolObs.ToolSchemaMatched,
 		}))
 	}
@@ -368,11 +369,19 @@ func (r *runner) runCacheRate(ctx context.Context, state *modelState, totalModel
 		if first == 0 {
 			first = int64(observation.RequestMs)
 		}
+		observedPromptID := ""
+		upperContent := strings.ToUpper(observation.Content)
+		for _, candidate := range prompts {
+			if strings.Contains(upperContent, strings.ToUpper(candidate.marker)) {
+				observedPromptID = candidate.id
+				break
+			}
+		}
 		samples = append(samples, pricetest.CacheRateSample{
 			PromptID: phase.prompt.id, Role: phase.role, Round: phase.round, ContextChars: contextChars,
 			PromptTokens: int(observation.PromptTokens), CachedTokens: int(observation.CachedTokens), CacheCreationTokens: int(observation.CacheCreationTokens),
 			CacheTokensSeparate: r.credentials.Provider == "anthropic", TelemetryReported: observation.CacheTelemetryReported,
-			FirstResponseMs: first, MarkerMatch: strings.Contains(strings.ToUpper(observation.Content), strings.ToUpper(phase.prompt.marker)),
+			FirstResponseMs: first, ObservedPromptID: observedPromptID, MarkerMatch: observedPromptID == phase.prompt.id,
 		})
 	}
 	return pricetest.ProbeCacheRate(samples, variants, loops, contextChars)
@@ -737,6 +746,7 @@ func verdictRank(v string) int {
 		return 0
 	}
 }
+
 // isOpenAIFamily 判断是否为 OpenAI 系。Responses 与 Chat Completions 共用
 // 同一套 tokenizer 与 prompt 缓存语义，探针必须一视同仁，否则前者会落到
 // default 分支被当成"不支持缓存"，token 计数也会失去家族校正。
