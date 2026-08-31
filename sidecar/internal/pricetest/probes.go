@@ -483,9 +483,9 @@ func ProbeCostAnchor(spec model.ProbeSpec, obs CostAnchorObs) model.ProbeResult 
 var dateMarker = regexp.MustCompile(`-20\d{2}`)
 
 // modelFamily normalises a model id to a coarse family token (e.g.
-// "gpt-5-2026-01-01" → "gpt-5", "claude-opus-4-8" → "claude-opus",
-// "gemini-3.1-pro-preview" → "gemini-3.1"). Heuristic, used only for the
-// identity probe's family comparison.
+// "gpt-5-2026-01-01" → "gpt-5", "claude-3-opus-20240229" →
+// "claude-opus", "gemini-3.1-pro-preview" → "gemini-3.1"). Heuristic,
+// used only for the identity probe's family comparison.
 func modelFamily(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
 	n = strings.ReplaceAll(n, "_", "-")
@@ -497,6 +497,19 @@ func modelFamily(name string) string {
 		if strings.HasPrefix(candidate, "claude-") {
 			n = candidate
 		}
+	}
+	// Claude IDs have used both "claude-opus-..." and
+	// "claude-3-opus-..." forms. The flavor, rather than its position, is the
+	// stable family discriminator; generation and dated version tokens are not.
+	// Keep this aligned with the desktop engine's model_family behavior.
+	if strings.HasPrefix(n, "claude") {
+		for _, part := range strings.Split(n, "-") {
+			switch part {
+			case "opus", "sonnet", "haiku":
+				return "claude-" + part
+			}
+		}
+		return "claude"
 	}
 	if loc := dateMarker.FindStringIndex(n); loc != nil && loc[0] > 0 {
 		n = n[:loc[0]]

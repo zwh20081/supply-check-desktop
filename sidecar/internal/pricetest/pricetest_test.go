@@ -251,6 +251,51 @@ func TestQuality_BedrockIdentityQualifierIsRoutingNotFamily(t *testing.T) {
 	assert.Equal(t, model.ProbeStatusFail, r.Status)
 }
 
+func TestQuality_ClaudeIdentityFamilyIncludesFlavorAtAnySegment(t *testing.T) {
+	spec := model.ProbeSpec{}
+	tests := []struct {
+		name      string
+		requested string
+		upstream  string
+		want      string
+	}{
+		{
+			name:      "same opus flavor across dated versions",
+			requested: "claude-3-opus-20240229",
+			upstream:  "claude-3-opus-20240415",
+			want:      model.ProbeStatusPass,
+		},
+		{
+			name:      "different flavor after generation token",
+			requested: "claude-3-opus-20240229",
+			upstream:  "claude-3-sonnet-20240229",
+			want:      model.ProbeStatusFail,
+		},
+		{
+			name:      "bedrock qualifier preserves later haiku flavor",
+			requested: "claude-3-haiku-20240307",
+			upstream:  "us.anthropic.claude-3-haiku-20241022-v1:0",
+			want:      model.ProbeStatusPass,
+		},
+		{
+			name:      "bedrock qualifier does not hide later flavor swap",
+			requested: "claude-3-haiku-20240307",
+			upstream:  "global.anthropic.claude-3-sonnet-20241022-v2:0",
+			want:      model.ProbeStatusFail,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := ProbeIdentity(spec, IdentityObs{
+				RequestedModel: tt.requested,
+				UpstreamModel:  tt.upstream,
+			})
+			assert.Equal(t, tt.want, r.Status)
+		})
+	}
+}
+
 func TestProbeCostAnchor(t *testing.T) {
 	spec := model.ProbeSpec{}
 	// no anchor → skip
