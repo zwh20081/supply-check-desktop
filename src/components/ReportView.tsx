@@ -39,6 +39,7 @@ interface Props { report: BatchReport; onRetest: () => void; }
 export default function ReportView({ report, onRetest }: Props) {
   const styles = useAppStyles();
   const { t } = useI18n();
+  const [openPdfError, setOpenPdfError] = useState('');
 
   const formatDuration = (milliseconds: number) =>
     milliseconds < 1000 ? `${milliseconds} ms` : t.seconds((milliseconds / 1000).toFixed(1));
@@ -53,6 +54,15 @@ export default function ReportView({ report, onRetest }: Props) {
     [report.models, selectedID],
   );
   const verdict = verdictOf(report.verdict);
+
+  const openPdf = async () => {
+    setOpenPdfError('');
+    try {
+      await invoke('open_pdf', { path: report.pdfPath });
+    } catch (error) {
+      setOpenPdfError(String(error));
+    }
+  };
 
   const metrics = [
     { label: t.avgScore, value: String(report.trustScore) },
@@ -75,13 +85,19 @@ export default function ReportView({ report, onRetest }: Props) {
           <Button
             appearance='primary'
             icon={<FilePdf size={16} weight='fill' />}
-            onClick={() => invoke('open_pdf', { path: report.pdfPath })}
+            onClick={() => void openPdf()}
             disabled={!report.pdfPath}
           >
             {t.openPdf}
           </Button>
         </Tooltip>
       </div>
+
+      {openPdfError && (
+        <MessageBar intent='error' layout='multiline'>
+          <MessageBarBody className={styles.wrapAnywhere}>{openPdfError}</MessageBarBody>
+        </MessageBar>
+      )}
 
       <Caption1 className={styles.navHint}>{t.reportSubtitle(report.totalModels)}</Caption1>
 

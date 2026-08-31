@@ -1,6 +1,7 @@
 /* 只保留画布层。组件样式全部走 Fluent makeStyles + tokens（见 useAppStyles.ts）。 */
 
 :root {
+  color-scheme: dark;
   font-family: "Segoe UI Variable", "Microsoft YaHei UI", "PingFang SC", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -16,6 +17,7 @@
 
 @media (prefers-color-scheme: light) {
   :root {
+    color-scheme: light;
     --canvas: rgb(238 242 241 / 26%);
     --mesh-a: rgb(13 148 136 / 18%);
     --mesh-b: rgb(14 165 233 / 14%);

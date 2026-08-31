@@ -1,5 +1,4 @@
 import { makeStyles, shorthands, tokens } from '@fluentui/react-components';
-import { DARK_FLYOUT, FLYOUT_VAR } from './theme';
 
 /**
  * 玻璃质感统一在这里。面板本身不滚动（整页滚动），
@@ -211,13 +210,6 @@ export const useAppStyles = makeStyles({
     fontVariantNumeric: 'tabular-nums',
   },
 
-  /* Dropdown 弹出层压成实心。变量由 main.tsx 下发到 :root，
-     因为浮层走 portal 挂在 body 下，取不到 FluentProvider 的作用域。 */
-  listbox: {
-    backgroundColor: `var(${FLYOUT_VAR}, ${DARK_FLYOUT})`,
-    backdropFilter: 'blur(24px)',
-    WebkitBackdropFilter: 'blur(24px)',
-  },
   colGap: { display: 'grid', rowGap: '14px' },
 
   // --- 协议卡 ---

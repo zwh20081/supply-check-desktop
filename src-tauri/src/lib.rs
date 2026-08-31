@@ -45,11 +45,37 @@ fn open_pdf(path: String) -> Result<(), String> {
     {
         return Err("PDF 报告不存在".to_string());
     }
+
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer")
-        .arg(report)
-        .spawn()
-        .map_err(|error| format!("无法打开 PDF: {error}"))?;
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+
+        let path = report
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        // 直接交给 Windows Shell 的文件关联，不启动 explorer/cmd 子进程，
+        // 因而不会额外创建控制台窗口。
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                path.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if result as isize <= 32 {
+            return Err(format!(
+                "无法使用系统默认应用打开 PDF（Windows 错误码 {}）",
+                result as isize
+            ));
+        }
+    }
+
     Ok(())
 }
 

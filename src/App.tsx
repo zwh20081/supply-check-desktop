@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import {
-  Badge, Body1, Button, Caption1, Card, CardHeader, Checkbox, Divider, Dropdown,
-  Field, Input, MessageBar, MessageBarBody, MessageBarTitle, Option, ProgressBar,
-  SearchBox, Skeleton, SkeletonItem, Slider, Spinner, Subtitle2, Tab, TabList,
+  Badge, Body1, Button, Caption1, Card, CardHeader, Checkbox, Divider, Field,
+  Input, MessageBar, MessageBarBody, MessageBarTitle, ProgressBar, SearchBox,
+  Select, Skeleton, SkeletonItem, Slider, Spinner, Subtitle2, Tab, TabList,
   Title3, Tooltip, mergeClasses,
 } from '@fluentui/react-components';
 import {
@@ -247,23 +247,19 @@ export default function App() {
               </Tab>
             ))}
           </TabList>
-          <Dropdown
+          <Select
             size='small'
-            value={LOCALE_LABELS[locale]}
-            selectedOptions={[locale]}
+            value={locale}
             aria-label={t.language}
             className={styles.langPicker}
-            listbox={{ className: styles.listbox }}
-            onOptionSelect={(_, data) => {
-              if (data.optionValue) setLocale(data.optionValue as Locale);
-            }}
+            onChange={(_, data) => setLocale(data.value as Locale)}
           >
             {LOCALES.map((item) => (
-              <Option key={item} value={item} text={LOCALE_LABELS[item]}>
+              <option key={item} value={item}>
                 {LOCALE_LABELS[item]}
-              </Option>
+              </option>
             ))}
-          </Dropdown>
+          </Select>
         </header>
 
         <main className={mergeClasses(styles.step, styles.glass, styles.stepEnter)} key={step}>

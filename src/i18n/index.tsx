@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { isTauri } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { LOCALES, MESSAGES, type Locale, type Messages } from './messages';
 
@@ -49,8 +50,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     const title = MESSAGES[locale].windowTitle;
     document.title = title;
     // 原生标题栏由 Tauri 管，跟 document.title 是两套，要单独设。
-    // 纯浏览器下跑 bun run dev 时没有 Tauri 环境，静默忽略即可。
-    getCurrentWindow().setTitle(title).catch(() => {});
+    // getCurrentWindow 在浏览器环境会同步抛错，不能只在 Promise 上 catch。
+    if (isTauri()) getCurrentWindow().setTitle(title).catch(() => {});
   }, [locale]);
 
   const value = useMemo<Ctx>(

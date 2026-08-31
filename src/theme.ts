@@ -54,13 +54,3 @@ export const lightGlassTheme = glassify(createLightTheme(brand), {
   colorNeutralStroke2: 'rgba(13, 30, 27, 0.07)',
   colorNeutralStrokeAccessible: 'rgba(13, 30, 27, 0.42)',
 });
-
-/**
- * 浮层（Dropdown 弹出列表等）必须近乎实心。它们悬浮在正文之上，
- * 沿用上面的半透明 surface token 会让两层文字叠在一起读不清 —— 这正是
- * 原生 <select> 弹出层在深色玻璃界面下变成灰底灰字的原因。
- * 用 CSS 变量下发，好让 makeStyles 在两种模式下取到各自的值。
- */
-export const FLYOUT_VAR = '--flyout-bg';
-export const DARK_FLYOUT = 'rgba(24, 30, 29, 0.97)';
-export const LIGHT_FLYOUT = 'rgba(252, 254, 253, 0.97)';
