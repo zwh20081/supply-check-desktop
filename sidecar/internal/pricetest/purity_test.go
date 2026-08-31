@@ -202,13 +202,13 @@ func TestQuality_DiscreteSignatureSplitRemainsHighConfidenceFailure(t *testing.T
 	for i := 0; i < 5; i++ {
 		s = append(s, PuritySample{
 			FirstChunkMs: 120 + int64(i), PromptTokens: 20,
-			SysFingerprint: "bedrock-fp", IdScheme: "msg", NamedBackend: "bedrock",
+			SysFingerprint: "bedrock-fp", IdScheme: "msg",
 		})
 	}
 	for i := 0; i < 5; i++ {
 		s = append(s, PuritySample{
 			FirstChunkMs: 125 + int64(i), PromptTokens: 21,
-			SysFingerprint: "vertex-fp", IdScheme: "msg", NamedBackend: "vertex",
+			SysFingerprint: "vertex-fp", IdScheme: "msg",
 		})
 	}
 
@@ -264,13 +264,13 @@ func TestQuality_AllDiscreteSignatureClustersWithTwoPlusSamplesFail(t *testing.T
 	for i := 0; i < 6; i++ {
 		s = append(s, PuritySample{
 			FirstChunkMs: 120 + int64(i), PromptTokens: 20,
-			SysFingerprint: "bedrock-fp", IdScheme: "msg", NamedBackend: "bedrock",
+			SysFingerprint: "bedrock-fp", IdScheme: "msg",
 		})
 	}
 	for i := 0; i < 2; i++ {
 		s = append(s, PuritySample{
 			FirstChunkMs: 126 + int64(i), PromptTokens: 21,
-			SysFingerprint: "vertex-fp", IdScheme: "msg", NamedBackend: "vertex",
+			SysFingerprint: "vertex-fp", IdScheme: "msg",
 		})
 	}
 
@@ -296,18 +296,18 @@ func TestQuality_SingletonNoiseDoesNotEraseRepeatableSignatureSplit(t *testing.T
 	for i := 0; i < 7; i++ {
 		s = append(s, PuritySample{
 			FirstChunkMs: 120 + int64(i), PromptTokens: 20,
-			SysFingerprint: "bedrock-fp", IdScheme: "msg", NamedBackend: "bedrock",
+			SysFingerprint: "bedrock-fp", IdScheme: "msg",
 		})
 	}
 	for i := 0; i < 2; i++ {
 		s = append(s, PuritySample{
 			FirstChunkMs: 127 + int64(i), PromptTokens: 21,
-			SysFingerprint: "vertex-fp", IdScheme: "msg", NamedBackend: "vertex",
+			SysFingerprint: "vertex-fp", IdScheme: "msg",
 		})
 	}
 	s = append(s, PuritySample{
 		FirstChunkMs: 129, PromptTokens: 20,
-		SysFingerprint: "", IdScheme: "msg", NamedBackend: "bedrock",
+		SysFingerprint: "", IdScheme: "msg",
 	})
 
 	analysis := AnalyzePurity(s)
@@ -321,4 +321,101 @@ func TestQuality_SingletonNoiseDoesNotEraseRepeatableSignatureSplit(t *testing.T
 
 	probe := ProbeChannelPurity(analysis, 0)
 	assert.Equal(t, model.ProbeStatusFail, probe.Status)
+}
+
+func TestQuality_RepeatedMissingOptionalTelemetryIsOnlyVariance(t *testing.T) {
+	// Fingerprints are optional telemetry. Repeated presence vs absence from one
+	// explicitly named backend must not become high-confidence blend evidence.
+	s := make([]PuritySample, 0, 10)
+	for i := 0; i < 7; i++ {
+		s = append(s, PuritySample{
+			FirstChunkMs: 120 + int64(i), PromptTokens: 20,
+			SysFingerprint: "stable-fp", IdScheme: "msg", NamedBackend: "bedrock",
+		})
+	}
+	for i := 0; i < 3; i++ {
+		s = append(s, PuritySample{
+			FirstChunkMs: 127 + int64(i), PromptTokens: 20,
+			SysFingerprint: "", IdScheme: "msg", NamedBackend: "bedrock",
+		})
+	}
+
+	analysis := AnalyzePurity(s)
+	require.Equal(t, PurityVerdictSignatureVariance, analysis.Verdict)
+	assert.Equal(t, 2, analysis.Signals["repeatable_signatures"])
+	assert.Equal(t, 0, analysis.Signals["strong_signature_pairs"])
+	assert.Equal(t, false, analysis.Signals["discrete_signature_split"])
+	assert.Equal(t, true, analysis.Signals["discrete_signature_anomaly"])
+	assert.Equal(t, "discrete_signature_anomaly", analysis.Signals["blend_basis"])
+	assert.Equal(t, "low", analysis.Signals["confidence"])
+	assert.Equal(t, model.ProbeStatusWarn, ProbeChannelPurity(analysis, 0).Status)
+}
+
+func TestQuality_RepeatedFingerprintRotationIsOnlyVariance(t *testing.T) {
+	// An official backend may rotate deployments and therefore fingerprints.
+	// Without a token, ID-scheme, or named-backend conflict this is not a blend.
+	s := make([]PuritySample, 0, 10)
+	for i := 0; i < 6; i++ {
+		s = append(s, PuritySample{
+			PromptTokens: 20, SysFingerprint: "deployment-a",
+			IdScheme: "msg", NamedBackend: "bedrock",
+		})
+	}
+	for i := 0; i < 4; i++ {
+		s = append(s, PuritySample{
+			PromptTokens: 20, SysFingerprint: "deployment-b",
+			IdScheme: "msg", NamedBackend: "bedrock",
+		})
+	}
+
+	analysis := AnalyzePurity(s)
+	require.Equal(t, PurityVerdictSignatureVariance, analysis.Verdict)
+	assert.Equal(t, 2, analysis.Signals["repeatable_signatures"])
+	assert.Equal(t, 0, analysis.Signals["strong_signature_pairs"])
+	assert.Equal(t, "discrete_signature_anomaly", analysis.Signals["blend_basis"])
+	assert.Equal(t, model.ProbeStatusWarn, ProbeChannelPurity(analysis, 0).Status)
+}
+
+func TestQuality_ConflictingNamedBackendsFailWithIdenticalSignatures(t *testing.T) {
+	// Explicit backend identity is direct evidence and must not disappear merely
+	// because the relay normalized token/fingerprint/id telemetry.
+	s := make([]PuritySample, 0, 10)
+	for i := 0; i < 5; i++ {
+		s = append(s, PuritySample{
+			FirstChunkMs: 120 + int64(i), PromptTokens: 20,
+			SysFingerprint: "normalized", IdScheme: "msg", NamedBackend: "bedrock",
+		})
+	}
+	for i := 0; i < 5; i++ {
+		s = append(s, PuritySample{
+			FirstChunkMs: 125 + int64(i), PromptTokens: 20,
+			SysFingerprint: "normalized", IdScheme: "msg", NamedBackend: "vertex",
+		})
+	}
+
+	analysis := AnalyzePurity(s)
+	require.Equal(t, PurityVerdictSuspectedBlend, analysis.Verdict)
+	assert.Equal(t, true, analysis.Signals["named_backend_conflict"])
+	assert.Equal(t, 2, analysis.Signals["repeatable_named_backends"])
+	assert.Equal(t, 1, analysis.Signals["distinct_signatures"])
+	assert.Equal(t, "named_backend_conflict", analysis.Signals["blend_basis"])
+	assert.Equal(t, "high", analysis.Signals["confidence"])
+	assert.Equal(t, 50, analysis.Purity)
+	require.Len(t, analysis.Clusters, 2)
+	assert.Equal(t, model.ProbeStatusFail, ProbeChannelPurity(analysis, 0).Status)
+}
+
+func TestQuality_SingleNamedBackendOutlierIsOnlyVariance(t *testing.T) {
+	s := make([]PuritySample, 0, 10)
+	for i := 0; i < 9; i++ {
+		s = append(s, PuritySample{PromptTokens: 20, IdScheme: "msg", NamedBackend: "bedrock"})
+	}
+	s = append(s, PuritySample{PromptTokens: 20, IdScheme: "msg", NamedBackend: "vertex"})
+
+	analysis := AnalyzePurity(s)
+	require.Equal(t, PurityVerdictSignatureVariance, analysis.Verdict)
+	assert.Equal(t, true, analysis.Signals["named_backend_anomaly"])
+	assert.Equal(t, false, analysis.Signals["named_backend_conflict"])
+	assert.Equal(t, "named_backend_anomaly", analysis.Signals["blend_basis"])
+	assert.Equal(t, model.ProbeStatusWarn, ProbeChannelPurity(analysis, 0).Status)
 }
