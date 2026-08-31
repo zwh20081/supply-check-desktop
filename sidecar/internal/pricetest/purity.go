@@ -60,7 +60,8 @@ type PurityResult struct {
 const (
 	PurityVerdictSingleClean    = "single_clean"    // one coherent, transparent source
 	PurityVerdictOpaqueSingle   = "opaque_single"   // one source but fully normalized (black box)
-	PurityVerdictSuspectedBlend = "suspected_blend" // ≥2 sources (discrete signature split or multimodal timing)
+	PurityVerdictSuspectedBlend = "suspected_blend" // ≥2 sources supported by a discrete signature split
+	PurityVerdictTimingVariance = "timing_variance" // multimodal TTFT only; noteworthy, but not proof of a blend
 	PurityVerdictWrapped        = "wrapped"         // repackaged via an agent/IDE subscription
 	PurityVerdictInconclusive   = "inconclusive"    // too few usable samples
 )
@@ -68,7 +69,12 @@ const (
 // AnalyzePurity is pure: samples → verdict. Thresholds are conservative to avoid
 // crying "blend" on ordinary network jitter.
 func AnalyzePurity(samples []PuritySample) PurityResult {
-	res := PurityResult{Samples: len(samples), Signals: map[string]any{}}
+	res := PurityResult{Samples: len(samples), Signals: map[string]any{
+		// These fields describe confidence in a blend/wrapper assertion, not
+		// confidence that an otherwise coherent channel is globally "pure".
+		"blend_basis": "none",
+		"confidence":  "insufficient_evidence",
+	}}
 	ok := make([]PuritySample, 0, len(samples))
 	for _, s := range samples {
 		if !s.Errored {
@@ -151,27 +157,39 @@ func AnalyzePurity(samples []PuritySample) PurityResult {
 	res.Signals["ttft_conclusive"] = len(ttft) >= 4
 
 	blendByDiscrete := len(sigGroups) >= 2
-	blendByTiming := ttftClusters >= 2
-	blended := blendByDiscrete || blendByTiming
+	timingMultimodal := ttftClusters >= 2
+	res.Signals["discrete_signature_split"] = blendByDiscrete
+	res.Signals["timing_multimodal"] = timingMultimodal
 
 	// --- build clusters + purity ----------------------------------------------
 	wrapped := res.WrapperShare >= 0.34 // a third+ of samples leak a wrapper
 	switch {
 	case wrapped:
+		res.Signals["blend_basis"] = "wrapper_marker"
+		res.Signals["confidence"] = "high"
 		res.Verdict = PurityVerdictWrapped
 		res.Clusters = clustersFromWrapper(ok, wrapName, res.WrapperShare)
 		res.Purity = int(math.Round((1 - res.WrapperShare) * 100)) // "pure" share = the non-wrapped part
 	case blendByDiscrete:
+		res.Signals["blend_basis"] = "discrete_signature_split"
+		res.Signals["confidence"] = "high"
 		res.Verdict = PurityVerdictSuspectedBlend
 		res.Clusters, res.Purity = clustersFromSignatures(sigGroups, len(ok))
-	case blendByTiming:
-		res.Verdict = PurityVerdictSuspectedBlend
+	case timingMultimodal:
+		// TTFT modes can come from routing, but also from ordinary queueing,
+		// regional network paths, cold starts, or provider-side scheduling. Keep
+		// the shape visible without claiming that it proves multiple sources.
+		res.Signals["blend_basis"] = "timing_multimodality_only"
+		res.Signals["confidence"] = "low"
+		res.Verdict = PurityVerdictTimingVariance
 		res.Clusters, res.Purity = clustersFromTiming(ttftShares, len(ok))
 	case res.Transparency == "opaque":
+		res.Signals["confidence"] = "not_applicable"
 		res.Verdict = PurityVerdictOpaqueSingle
 		res.Purity = 100
 		res.Clusters = []PurityCluster{{Label: "opaque", Named: false, Share: 1, Count: len(ok)}}
 	default:
+		res.Signals["confidence"] = "not_applicable"
 		res.Verdict = PurityVerdictSingleClean
 		res.Purity = 100
 		label, named1 := "single", false
@@ -180,7 +198,6 @@ func AnalyzePurity(samples []PuritySample) PurityResult {
 		}
 		res.Clusters = []PurityCluster{{Label: label, Named: named1, Share: 1, Count: len(ok)}}
 	}
-	_ = blended
 	return res
 }
 
@@ -195,13 +212,14 @@ func ProbeChannelPurity(analysis PurityResult, failedRequests int) model.ProbeRe
 			"purity": analysis.Purity, "verdict": analysis.Verdict,
 			"transparency": analysis.Transparency, "wrapper_share": analysis.WrapperShare,
 			"clusters": analysis.Clusters, "signals": analysis.Signals,
+			"blend_basis": analysis.Signals["blend_basis"], "confidence": analysis.Signals["confidence"],
 			"failed_requests": failedRequests,
 		},
 	}
 	switch analysis.Verdict {
 	case PurityVerdictSingleClean:
 		result.Status = model.ProbeStatusPass
-	case PurityVerdictOpaqueSingle:
+	case PurityVerdictOpaqueSingle, PurityVerdictTimingVariance:
 		result.Status = model.ProbeStatusWarn
 	case PurityVerdictSuspectedBlend, PurityVerdictWrapped:
 		result.Status = model.ProbeStatusFail
