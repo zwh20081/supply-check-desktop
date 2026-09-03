@@ -17,11 +17,26 @@ var (
 	maskApiKeyPattern = regexp.MustCompile(`(['"]?)api_key:([^\s'"]+)(['"]?)`)
 	// maskBearerPattern masks "Bearer <token>" in error text (e.g. echoed Authorization headers).
 	maskBearerPattern = regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._\-]{6,}`)
+	// maskBasicPattern masks "Basic <base64>" — base64 credentials decode to a
+	// usable user:password pair, so the payload must never survive into a report.
+	maskBasicPattern = regexp.MustCompile(`(?i)\bbasic\s+[A-Za-z0-9+/=]{8,}`)
+	// maskJWTPattern masks three-segment JSON Web Tokens. Relay error bodies
+	// frequently echo the submitted bearer token verbatim.
+	maskJWTPattern = regexp.MustCompile(`\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{4,}`)
 	// maskTokenPattern masks bare secret-shaped tokens that upstreams sometimes
 	// echo back verbatim in error bodies (e.g. "Incorrect API key provided: sk-...").
 	// Only very key-like shapes are matched to avoid redacting ordinary words.
-	maskTokenPattern = regexp.MustCompile(`\b(sk-[A-Za-z0-9_\-]{8,}|AIza[A-Za-z0-9_\-]{20,}|AKIA[A-Z0-9]{12,})`)
+	// Ordered longest-prefix-first so github_pat_ is not shadowed by a shorter rule.
+	maskTokenPattern = regexp.MustCompile(`\b(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|xox[baprs]-[A-Za-z0-9\-]{10,}|sk-ant-[A-Za-z0-9_\-]{8,}|sk-[A-Za-z0-9_\-]{8,}|AIza[A-Za-z0-9_\-]{20,}|AKIA[A-Z0-9]{12,}|ASIA[A-Z0-9]{12,})`)
 )
+
+// maskTokenPrefixes maps a detected secret to the stub kept in evidence. Enough
+// to identify WHICH credential family leaked, never enough to use it.
+var maskTokenPrefixes = []string{
+	"github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
+	"xoxb-", "xoxa-", "xoxp-", "xoxr-", "xoxs-",
+	"sk-ant-", "sk-", "AIza", "AKIA", "ASIA",
+}
 
 func maskHostTail(parts []string) []string {
 	if len(parts) < 2 {
@@ -140,17 +155,30 @@ func MaskSensitiveInfo(str string) string {
 	// Mask echoed bearer tokens and bare secret-shaped keys (e.g. upstream error
 	// bodies that quote the submitted credential verbatim).
 	str = maskBearerPattern.ReplaceAllString(str, "Bearer ***")
+	str = maskBasicPattern.ReplaceAllString(str, "Basic ***")
+	str = maskJWTPattern.ReplaceAllString(str, "eyJ***")
 	str = maskTokenPattern.ReplaceAllStringFunc(str, func(m string) string {
-		switch {
-		case strings.HasPrefix(m, "sk-"):
-			return "sk-***"
-		case strings.HasPrefix(m, "AIza"):
-			return "AIza***"
-		case strings.HasPrefix(m, "AKIA"):
-			return "AKIA***"
+		for _, prefix := range maskTokenPrefixes {
+			if strings.HasPrefix(m, prefix) {
+				return prefix + "***"
+			}
 		}
 		return "***"
 	})
 
 	return str
+}
+
+// TruncateRunes bounds a string by RUNE count. Byte slicing would split a
+// multi-byte character and produce mojibake in the report, so evidence fields
+// must use this instead of s[:n].
+func TruncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
 }

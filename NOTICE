@@ -1,0 +1,32 @@
+# NOTICE
+
+## 货源体检桌面版 (supply-check-desktop)
+
+本产品包含改编自第三方项目的审计方法。
+
+### api-relay-audit
+
+`sidecar/internal/pricetest/relay_security_probe.go` 中的中转安全审计分类器
+（P16 提示词泄露、P17 指令策略、P18 工具替换、P19 上下文完整性）改编自：
+
+    github.com/toby-bridges/api-relay-audit
+    Licensed under AGPL-3.0-only
+
+原项目的审计**方法**（探测路径与判定思路）被采用；实现代码是针对本项目
+证据模型重写的原生实现，未直接复制上游源码。
+
+AGPL-3.0-only 全文见 https://www.gnu.org/licenses/agpl-3.0.txt
+
+### 第三方 Go 依赖
+
+侧车通过三家厂商的官方 Go SDK 访问上游，各自许可证见其仓库：
+
+| 依赖 | 许可证 |
+| --- | --- |
+| github.com/openai/openai-go | Apache-2.0 |
+| github.com/anthropics/anthropic-sdk-go | MIT |
+| google.golang.org/genai | Apache-2.0 |
+| github.com/tiktoken-go/tokenizer | MIT |
+| github.com/nicksnyder/go-i18n | MIT |
+
+完整依赖清单见 `sidecar/go.mod`。

@@ -1,7 +1,4 @@
-use crate::models::{
-    BatchReport, CompletionObservation, CompletionRequest, Credentials, ModelInfo, ProgressEvent,
-    RunAllRequest,
-};
+use crate::models::{BatchReport, Credentials, ModelInfo, ProgressEvent, RunAllRequest};
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -93,14 +90,6 @@ fn sidecar_command(executable: &Path) -> tokio::process::Command {
 struct SdkRequest<'a> {
     action: &'a str,
     credentials: &'a Credentials,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system_prompt: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -108,7 +97,6 @@ struct SdkRequest<'a> {
 struct SdkResponse {
     #[serde(default)]
     models: Vec<ModelInfo>,
-    observation: Option<CompletionObservation>,
     report: Option<BatchReport>,
     error: Option<String>,
 }
@@ -134,10 +122,6 @@ pub async fn list_models(
         &SdkRequest {
             action: "models",
             credentials,
-            model: None,
-            prompt: None,
-            system_prompt: None,
-            max_tokens: None,
         },
     )
     .await?;
@@ -181,27 +165,6 @@ pub async fn run_all(app: &AppHandle, request: RunAllRequest) -> Result<BatchRep
     response
         .report
         .ok_or_else(|| "SDK sidecar 没有返回批量体检报告".to_string())
-}
-
-pub async fn complete(
-    app: &AppHandle,
-    request: CompletionRequest<'_>,
-) -> Result<CompletionObservation, String> {
-    let response = call(
-        app,
-        &SdkRequest {
-            action: "complete",
-            credentials: request.credentials,
-            model: Some(request.model),
-            prompt: Some(request.prompt),
-            system_prompt: request.system_prompt,
-            max_tokens: Some(request.max_tokens),
-        },
-    )
-    .await?;
-    response
-        .observation
-        .ok_or_else(|| "SDK sidecar 没有返回模型观察结果".to_string())
 }
 
 async fn call_with_progress(
@@ -278,6 +241,10 @@ async fn call_with_progress(
     Ok(response)
 }
 
+/// 单次（非批量）调用的上限。批量路径靠 cancel_batch 兜底，这条路径没有
+/// 用户可见的终止入口，所以必须自己超时，否则侧车挂住就是 UI 永久转圈。
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 async fn call(app: &AppHandle, request: &SdkRequest<'_>) -> Result<SdkResponse, String> {
     let executable = resolve_sidecar(app)?;
     let payload =
@@ -294,12 +261,20 @@ async fn call(app: &AppHandle, request: &SdkRequest<'_>) -> Result<SdkResponse, 
         .write_all(&payload)
         .await
         .map_err(|error| format!("无法写入 SDK 请求: {error}"))?;
+    // 必须关掉 stdin：侧车读到 EOF 才会开始干活。
     drop(stdin);
 
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|error| format!("等待 SDK sidecar 失败: {error}"))?;
+    // wait_with_output 会并发排空 stdout 与 stderr，两条管道都不会因为对侧
+    // 缓冲写满而卡死。超时后 kill_on_drop 负责收掉进程。
+    let output = match tokio::time::timeout(CALL_TIMEOUT, child.wait_with_output()).await {
+        Ok(result) => result.map_err(|error| format!("等待 SDK sidecar 失败: {error}"))?,
+        Err(_) => {
+            return Err(format!(
+                "SDK sidecar 超过 {} 秒没有响应",
+                CALL_TIMEOUT.as_secs()
+            ))
+        }
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("SDK sidecar 退出异常: {}", stderr.trim()));
@@ -360,7 +335,10 @@ fn bundled_sidecar_filename() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{bundled_sidecar_filename, sidecar_filename};
+    use super::{
+        bundled_sidecar_filename, sidecar_filename, SdkRequest, SdkResponse, SidecarProgress,
+    };
+    use crate::models::{Credentials, Provider};
 
     #[test]
     fn sidecar_name_contains_target_triple() {
@@ -370,5 +348,101 @@ mod tests {
     #[test]
     fn bundled_sidecar_name_has_no_target_triple() {
         assert!(!bundled_sidecar_filename().contains(env!("BUILD_TARGET")));
+    }
+
+    fn credentials() -> Credentials {
+        Credentials {
+            provider: Provider::Openai,
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: "sk-secret-value-do-not-leak".to_string(),
+        }
+    }
+
+    /// The sidecar contract is camelCase on the wire. A silent rename here means
+    /// the Go side reads a zero value and the audit runs on wrong parameters.
+    #[test]
+    fn request_serializes_camel_case_contract() {
+        let creds = credentials();
+        let payload = serde_json::to_value(SdkRequest {
+            action: "models",
+            credentials: &creds,
+        })
+        .expect("request must serialize");
+
+        assert_eq!(payload["action"], "models");
+        assert_eq!(payload["credentials"]["baseUrl"], "https://api.openai.com/v1");
+        assert_eq!(payload["credentials"]["provider"], "openai");
+        assert!(
+            payload["credentials"].get("base_url").is_none(),
+            "snake_case would not be understood by the sidecar"
+        );
+    }
+
+    /// The API key must reach the sidecar over stdin, but it must never appear
+    /// in a Debug rendering — those end up in logs and error strings.
+    #[test]
+    fn credentials_debug_does_not_expose_api_key() {
+        let rendered = format!("{:?}", credentials());
+        assert!(
+            !rendered.contains("sk-secret-value-do-not-leak"),
+            "API key leaked through Debug: {rendered}"
+        );
+    }
+
+    #[test]
+    fn progress_parses_sidecar_camel_case_fields() {
+        let line = r#"{"kind":"progress","model":"gpt-4o","modelIndex":1,"modelTotal":2,
+            "probe":"token_count","completedRequests":7,"estimatedRequests":60,
+            "phase":"probe","message":"gpt-4o: token_count"}"#;
+        let progress: SidecarProgress =
+            serde_json::from_str(line).expect("progress line must parse");
+
+        assert_eq!(progress.model, "gpt-4o");
+        assert_eq!(progress.completed_requests, 7);
+        assert_eq!(progress.estimated_requests, 60);
+        assert_eq!(progress.phase, "probe");
+    }
+
+    /// A sidecar that omits `phase` must not abort the run — progress is
+    /// cosmetic, and the batch itself is expensive to restart.
+    #[test]
+    fn progress_tolerates_missing_optional_phase() {
+        let line = r#"{"model":"m","probe":"p","completedRequests":1,
+            "estimatedRequests":60,"message":"x"}"#;
+        let progress: SidecarProgress = serde_json::from_str(line).expect("must parse without phase");
+        assert_eq!(progress.phase, "");
+    }
+
+    #[test]
+    fn response_surfaces_sidecar_error() {
+        let response: SdkResponse =
+            serde_json::from_str(r#"{"error":"上游返回 401"}"#).expect("error response must parse");
+        assert_eq!(response.error.as_deref(), Some("上游返回 401"));
+        assert!(response.report.is_none());
+        assert!(response.models.is_empty());
+    }
+
+    /// Coverage fields carry the INCONCLUSIVE audit trail; dropping them here
+    /// would hide why a channel could not be measured.
+    #[test]
+    fn report_preserves_evidence_coverage_fields() {
+        let response: SdkResponse = serde_json::from_str(
+            r#"{"report":{"id":"desktop-1","provider":"openai","providerLabel":"OpenAI",
+                "baseUrl":"https://x/v1","startedAt":"t","finishedAt":"t","durationMs":1,
+                "totalModels":1,"completedModels":1,"failedModels":0,"estimatedRequests":60,
+                "completedRequests":60,"trustScore":0,"verdict":"INCONCLUSIVE","pdfPath":"",
+                "models":[
+                  {"id":1,"model":"gpt-4o","trustScore":0,"verdict":"INCONCLUSIVE",
+                   "requestCount":60,"promptTokens":1,"completionTokens":1,"totalTokens":2,
+                   "durationMs":1,"results":[],"criticalErrorRate":1.0,"criticalErrors":5,
+                   "criticalProbes":5,"insufficientReason":"identity_unmeasured"}]}}"#,
+        )
+        .expect("batch report must parse");
+
+        let report = response.report.expect("report present");
+        let model = &report.models[0];
+        assert_eq!(model.verdict, "INCONCLUSIVE");
+        assert_eq!(model.critical_error_rate, 1.0);
+        assert_eq!(model.insufficient_reason.as_deref(), Some("identity_unmeasured"));
     }
 }

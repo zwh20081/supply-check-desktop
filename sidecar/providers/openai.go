@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -15,17 +16,25 @@ import (
 	"supply-check-sdk/protocol"
 )
 
-func newOpenAIClient(credentials protocol.Credentials) openai.Client {
-	return openai.NewClient(
+func newOpenAIClient(credentials protocol.Credentials, recorder *metadataRecorder) openai.Client {
+	options := []option.RequestOption{
 		option.WithAPIKey(strings.TrimSpace(credentials.APIKey)),
 		option.WithBaseURL(strings.TrimRight(strings.TrimSpace(credentials.BaseURL), "/")),
-		option.WithRequestTimeout(300*time.Second),
+		option.WithRequestTimeout(300 * time.Second),
 		option.WithMaxRetries(0),
-	)
+	}
+	if recorder != nil {
+		options = append(options, option.WithMiddleware(func(request *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+			response, err := next(request)
+			recorder.observe(response)
+			return response, err
+		}))
+	}
+	return openai.NewClient(options...)
 }
 
 func listOpenAIModels(ctx context.Context, credentials protocol.Credentials) ([]protocol.ModelInfo, error) {
-	client := newOpenAIClient(credentials)
+	client := newOpenAIClient(credentials, nil)
 	page, err := client.Models.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("OpenAI SDK 拉取模型失败: %w", err)
@@ -80,7 +89,8 @@ func completeOpenAI(ctx context.Context, request protocol.Request) (*protocol.Ob
 	if request.Stream {
 		return streamOpenAI(ctx, request)
 	}
-	client := newOpenAIClient(request.Credentials)
+	recorder := &metadataRecorder{}
+	client := newOpenAIClient(request.Credentials, recorder)
 	started := time.Now()
 	response, err := client.Chat.Completions.New(ctx, openAIParams(request))
 	requestMs := uint64(time.Since(started).Milliseconds())
@@ -92,6 +102,7 @@ func completeOpenAI(ctx context.Context, request protocol.Request) (*protocol.Ob
 	}
 	choice := response.Choices[0]
 	observation := openAIObservation(response.ID, response.Model, response.SystemFingerprint, response.Usage, choice.Message.Content, choice.FinishReason, requestMs)
+	recorder.apply(observation)
 	if request.CacheKey != "" {
 		observation.ProviderCacheControlApplied = []string{"key_partition"}
 	}
@@ -100,7 +111,8 @@ func completeOpenAI(ctx context.Context, request protocol.Request) (*protocol.Ob
 }
 
 func streamOpenAI(ctx context.Context, request protocol.Request) (*protocol.Observation, error) {
-	client := newOpenAIClient(request.Credentials)
+	recorder := &metadataRecorder{}
+	client := newOpenAIClient(request.Credentials, recorder)
 	params := openAIParams(request)
 	params.StreamOptions = openai.ChatCompletionStreamOptionsParam{IncludeUsage: param.NewOpt(true)}
 	started := time.Now()
@@ -127,6 +139,7 @@ func streamOpenAI(ctx context.Context, request protocol.Request) (*protocol.Obse
 	first, p50 := streamTiming(started, contentAt)
 	choice := acc.Choices[0]
 	observation := openAIObservation(acc.ID, acc.Model, acc.SystemFingerprint, acc.Usage, choice.Message.Content, choice.FinishReason, uint64(time.Since(started).Milliseconds()))
+	recorder.apply(observation)
 	observation.FirstChunkMs = first
 	observation.InterTokenMsP50 = p50
 	observation.Chunks = len(contentAt)
@@ -145,10 +158,14 @@ func openAIObservation(id, model, fingerprint string, usage openai.CompletionUsa
 		PromptTokens: nonNegative(usage.PromptTokens), CompletionTokens: nonNegative(usage.CompletionTokens),
 		TotalTokens: nonNegative(usage.TotalTokens), CachedTokens: nonNegative(usage.PromptTokensDetails.CachedTokens),
 		CacheCreationTokens: nonNegative(usage.PromptTokensDetails.CacheWriteTokens), FinishReason: finish,
-		StopReason: finish, RequestMs: requestMs,
+		// reasoning_tokens is billed inside completion_tokens but never returned
+		// as text, so P2 must exclude it before recounting the visible answer.
+		ReasoningTokens:   nonNegative(usage.CompletionTokensDetails.ReasoningTokens),
+		ReasoningReported: usage.JSON.CompletionTokensDetails.Valid(),
+		StopReason:        finish, RequestMs: requestMs,
 		UsageReported:          usage.JSON.PromptTokens.Valid() || usage.JSON.TotalTokens.Valid(),
 		CacheTelemetryReported: usage.JSON.PromptTokensDetails.Valid(), MessageID: id,
-		ContentType: "application/json", Endpoint: "/v1/chat/completions", HTTPStatus: 200,
+		ContentType: "application/json", Endpoint: "/v1/chat/completions",
 		ResponseFormat: "openai_chat", ProtocolValid: true, TransportContextBound: true,
 	}
 }

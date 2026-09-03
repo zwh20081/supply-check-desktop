@@ -154,12 +154,16 @@ func (r *runner) runModel(ctx context.Context, modelName string, index, totalMod
 		state.observations = append(state.observations, first)
 		state.results = append(state.results,
 			pricetest.ProbeTokenCount(specToken(), pricetest.TokenCountObs{
-				UpstreamPromptTokens: int(first.PromptTokens), LocalPromptTokens: service.CountTextToken(tokenPrompt, modelName),
-				IsOpenAIFamily: isOpenAIFamily(r.credentials.Provider),
+				UpstreamPromptTokens: int(first.PromptTokens),
+				// The upstream bills the chat envelope (role/delimiter tokens plus
+				// reply priming), so the local baseline must include it too or every
+				// honest channel looks inflated — badly so on a short prompt.
+				LocalPromptTokens: service.CountChatPromptToken("", tokenPrompt, modelName),
+				IsOpenAIFamily:    isOpenAIFamily(r.credentials.Provider),
 			}),
 			pricetest.ProbeIdentity(model.ProbeSpec{}, pricetest.IdentityObs{RequestedModel: modelName, UpstreamModel: first.UpstreamModel, SystemFingerprint: first.SystemFingerprint}),
 			pricetest.ProbeProtocolContract(pricetest.ProtocolContractObs{Endpoint: first.Endpoint, HTTPStatus: first.HTTPStatus, ResponseFormat: first.ResponseFormat, ContentType: first.ContentType, ProtocolValid: first.ProtocolValid}),
-			usageResult(first, r.credentials.Provider == "anthropic"),
+			usageResult(first, r.credentials.Provider),
 		)
 	}
 
@@ -175,7 +179,9 @@ func (r *runner) runModel(ctx context.Context, modelName string, index, totalMod
 		state.results = append(state.results,
 			pricetest.ProbeLength(specLength(), pricetest.LengthObs{
 				CompletionTokens: int(streamObs.CompletionTokens), LocalRecount: service.CountTextToken(streamObs.Content, modelName),
-				ContentOK: sequenceOK(streamObs.Content), IsOpenAIFamily: isOpenAIFamily(r.credentials.Provider),
+				ReasoningTokens: int(streamObs.ReasoningTokens), ReasoningReported: streamObs.ReasoningReported,
+				ReasoningCapable: reasoningCapableModel(r.credentials.Provider, modelName),
+				ContentOK:        sequenceOK(streamObs.Content), IsOpenAIFamily: isOpenAIFamily(r.credentials.Provider),
 			}),
 			pricetest.ProbeLatency(model.ProbeSpec{Stream: true}, pricetest.LatencyObs{
 				FirstResponseMs: int64(streamObs.RequestMs), TokensPerSec: tokensPerSecond(streamObs), Streamed: true,
@@ -204,8 +210,18 @@ func (r *runner) runModel(ctx context.Context, modelName string, index, totalMod
 	}
 
 	state.results = append(state.results,
-		pricetest.ProbeCancellationContract(pricetest.CancellationContractObs{CarrierObserved: first != nil || streamObs != nil, ContextBound: first != nil || streamObs != nil}),
-		pricetest.ProbeRateLimitContract(pricetest.RateLimitContractObs{HTTPStatus: successStatus(first, streamObs), Headers: successHeaders(first, streamObs)}),
+		pricetest.ProbeCancellationContract(pricetest.CancellationContractObs{
+			CarrierObserved: first != nil || streamObs != nil,
+			// Read the flag the provider layer actually set on the carrier request
+			// rather than restating "a request succeeded" twice.
+			ContextBound: transportContextBound(first, streamObs),
+		}),
+		pricetest.ProbeRateLimitContract(pricetest.RateLimitContractObs{
+			HTTPStatus: successStatus(first, streamObs), Headers: successHeaders(first, streamObs),
+			// Headers are only meaningful when at least one request actually came
+			// back; with no carrier the empty map is our blind spot, not evidence.
+			HeadersObservable: first != nil || streamObs != nil,
+		}),
 	)
 
 	state.results = append(state.results, r.runGolden(ctx, state, totalModels))
@@ -223,7 +239,7 @@ func (r *runner) runModel(ctx context.Context, modelName string, index, totalMod
 	state.results = append(state.results, r.runSecurity(ctx, state, totalModels)...)
 
 	weights := pricetest.WeightsFromDefinitions(definitions())
-	score, verdict := pricetest.Score(state.results, weights)
+	score, verdict, coverage := pricetest.ScoreWithCoverage(state.results, weights)
 	sort.SliceStable(state.results, func(i, j int) bool { return probeOrder(state.results[i].Kind) < probeOrder(state.results[j].Kind) })
 	resultDTO := make([]protocol.ProbeResult, 0, len(state.results))
 	for _, result := range state.results {
@@ -234,6 +250,13 @@ func (r *runner) runModel(ctx context.Context, modelName string, index, totalMod
 		ID: index + 1, Model: modelName, TrustScore: score, Verdict: verdict,
 		RequestCount: state.requestCount, PromptTokens: state.promptTokens, CompletionTokens: state.completionTokens,
 		TotalTokens: state.totalTokens, DurationMs: time.Since(state.started).Milliseconds(), Results: resultDTO,
+		// Evidence coverage is the audit trail behind an INCONCLUSIVE verdict: a
+		// relay that stonewalls the probes which would catch it must be visibly
+		// unmeasured rather than quietly clean.
+		CriticalErrorRate:  coverage.CriticalErrorRate(),
+		CriticalErrors:     coverage.CriticalErrors,
+		CriticalProbes:     coverage.CriticalTotal,
+		InsufficientReason: coverage.InsufficientReason,
 	}
 }
 
@@ -633,8 +656,36 @@ func specGolden() model.ProbeSpec {
 	fail := 60.0
 	return model.ProbeSpec{MaxTokens: 512, FailPct: &fail, GoldenGenerators: []string{"arithmetic", "string_op", "unit_convert"}, GoldenCount: 4}
 }
-func usageResult(obs *protocol.Observation, separate bool) model.ProbeResult {
-	return pricetest.ProbeUsageReconciliation(pricetest.UsageReconciliationObs{Reported: obs.UsageReported, PromptTokens: int(obs.PromptTokens), CompletionTokens: int(obs.CompletionTokens), TotalTokens: int(obs.TotalTokens), CachedTokens: int(obs.CachedTokens), CacheCreationTokens: int(obs.CacheCreationTokens), CacheTokensSeparate: separate})
+func usageResult(obs *protocol.Observation, provider string) model.ProbeResult {
+	return pricetest.ProbeUsageReconciliation(pricetest.UsageReconciliationObs{
+		Reported: obs.UsageReported, PromptTokens: int(obs.PromptTokens), CompletionTokens: int(obs.CompletionTokens),
+		TotalTokens: int(obs.TotalTokens), CachedTokens: int(obs.CachedTokens), CacheCreationTokens: int(obs.CacheCreationTokens),
+		CacheTokensSeparate: provider == "anthropic",
+		ReasoningTokens:     int(obs.ReasoningTokens), ToolUsePromptTokens: int(obs.ToolUsePromptTokens),
+		// Gemini's totalTokenCount sums four parts; OpenAI/Anthropic bill
+		// reasoning inside the completion count.
+		ReasoningOutsideCompletion: provider == "google",
+	})
+}
+
+// reasoningCapableModel reports whether the model family can spend billed
+// reasoning tokens that never appear in the response text. Only these families
+// get the benefit of the doubt when reasoning telemetry is missing.
+func reasoningCapableModel(provider, modelName string) bool {
+	name := strings.ToLower(strings.TrimSpace(modelName))
+	switch provider {
+	case "openai", "openai-responses":
+		return strings.HasPrefix(name, "o1") || strings.HasPrefix(name, "o3") ||
+			strings.HasPrefix(name, "o4") || strings.HasPrefix(name, "gpt-5")
+	case "anthropic":
+		// Extended thinking exists from Claude 3.7 onward.
+		return !strings.Contains(name, "claude-3-") && !strings.Contains(name, "claude-2")
+	case "google":
+		// Gemini 2.5+ reports thoughtsTokenCount.
+		return strings.Contains(name, "gemini-2.5") || strings.Contains(name, "gemini-3")
+	default:
+		return false
+	}
 }
 func skippedCostAnchor() model.ProbeResult {
 	return model.ProbeResult{ProbeKey: "p6_cost_anchor", Kind: model.ProbeKindCostAnchor, Status: model.ProbeStatusSkip, Evidence: map[string]any{"reason": "standalone SDK mode has no gateway customer-price configuration"}}
@@ -680,6 +731,17 @@ func successStatus(values ...*protocol.Observation) int {
 		}
 	}
 	return 0
+}
+
+// transportContextBound reports whether the first carrier request that came back
+// was issued on the suite's cancellable context.
+func transportContextBound(values ...*protocol.Observation) bool {
+	for _, v := range values {
+		if v != nil {
+			return v.TransportContextBound
+		}
+	}
+	return false
 }
 func successHeaders(values ...*protocol.Observation) map[string]string {
 	for _, v := range values {

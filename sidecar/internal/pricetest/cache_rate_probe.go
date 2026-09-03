@@ -28,7 +28,6 @@ type CacheRateSample struct {
 	CacheTokensSeparate bool
 	TelemetryReported   bool
 	FirstResponseMs     int64
-	UpstreamCostQuota   int
 	MarkerMatch         bool
 	// ObservedPromptID is set only when the response contains a known marker
 	// belonging to a prompt variant. A different ID is direct replay evidence;
@@ -250,8 +249,8 @@ func cacheRateSampleEvidence(samples []CacheRateSample) []map[string]any {
 				sample.PromptTokens, sample.CachedTokens, sample.CacheCreationTokens, sample.CacheTokensSeparate,
 			)),
 			"telemetry_reported": sample.TelemetryReported, "first_response_ms": sample.FirstResponseMs,
-			"upstream_cost": sample.UpstreamCostQuota, "marker_match": sample.MarkerMatch,
-			"errored": sample.Errored,
+			"marker_match": sample.MarkerMatch,
+			"errored":      sample.Errored,
 		}
 		if sample.ObservedPromptID != "" {
 			row["observed_prompt_id"] = sample.ObservedPromptID

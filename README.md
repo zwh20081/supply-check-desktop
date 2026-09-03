@@ -2,7 +2,7 @@
 
 基于 Tauri v2 的本地桌面应用，用来审计一个 AI 上游渠道到底"兑没兑水"。
 
-填入 API Base 和 API Key，用对应厂商的**官方 SDK** 拉取模型列表，然后对每个模型跑完整 22 项探针套件（约 63 次真实上游请求），最后生成 PDF 报告。
+填入 API Base 和 API Key，用对应厂商的**官方 SDK** 拉取模型列表，然后对每个模型跑完整 22 项探针套件（约 60 次真实上游请求），最后生成 PDF 报告。
 
 项目完全自包含：探针实现、评分器、PDF 渲染器都在 `sidecar/internal/` 下，除三家官方 SDK 外没有外部服务或仓库依赖。
 
@@ -35,9 +35,8 @@ Go SDK 侧车                官方 SDK 调用、评分、PDF   sidecar/
 | `list_models` | 用官方 SDK 拉模型列表，过滤掉不能生成内容的模型 |
 | `run_all_healthchecks` | 批量体检 + 生成 PDF，返回 `BatchReport` |
 | `open_pdf` | 在系统文件管理器中打开报告（目前仅 Windows 实现） |
-| `run_healthcheck` | **遗留路径**，见下 |
 
-`run_healthcheck` 对应 `src-tauri/src/engine.rs`，是早期用 Rust 重写的单模型 7 请求精简版探针逻辑。当前前端不再调用它，实际生效的是 `sidecar/batch/runner.go`。改探针逻辑时**认准 Go 那份**，别改到 `engine.rs`。
+判定逻辑只有一份，就在 `sidecar/batch/runner.go` 与 `sidecar/internal/pricetest/` 下。Rust 侧只做进程编排与流解析，不做任何探针判定。
 
 ## 目录结构
 
@@ -126,7 +125,13 @@ cd sidecar; go test ./...
 cd ..; bun run test:rust
 ```
 
-Go 侧的判定内核（`internal/pricetest`、`internal/healthcheck`）有完整单测覆盖，另有两个契约测试盯住容易被改坏的地方：`TestCompleteSuiteContract` 锁死"22 项定义 / 63 次请求"这两个数字（前端 `REQUESTS_PER_MODEL` 常量与之对应，改动时两边都要同步），`TestWritePDFUsesOriginalBatchRenderer` 验证批量报告确实产出了合法 PDF 且包含汇总页与模型明细页。
+Go 侧的判定内核（`internal/pricetest`、`internal/healthcheck`）有完整单测覆盖。几组关键测试：
+
+- `internal/pricetest/adversarial_score_test.go` —— **对抗性评分套件**。假设中转站读过本仓库源码，验证"拒绝作答"永远不会比"如实作答"拿到更好的判定。这是整个工具可信度的地基。
+- `batch/request_contract_test.go` —— 用计数桩驱动整套探针，**实测** `execute()` 调用次数与 `RequestsPerModel` 一致（前端 `REQUESTS_PER_MODEL` 必须同步）。旧版契约测试只是在断言常量自己的算式，因此没能拦住前端漂移到 63。
+- `internal/service/token_accounting_test.go` —— 验证诚实渠道不会因为消息封装开销被误判。
+- `internal/common/mask_test.go` —— 证据脱敏。报告是用户会公开分享的材料，密钥泄漏等同于发布。
+- `TestWritePDFUsesOriginalBatchRenderer` —— 批量报告确实产出合法 PDF 且包含汇总页与模型明细页。
 
 检查 PDF 排版：
 
@@ -146,7 +151,9 @@ go run ./cmd/pdf-sample ../tmp/pdfs/sample.pdf
 
 几个执行细节：
 
-- 每个请求最多重试 3 次（退避 100/200ms），单次尝试超时 300 秒。失败的探针记为 `error`，**不扣信任分**，但会让整体判定降级为"未测出"
+- 每个请求最多重试 3 次（退避 100/200ms），单次尝试超时 300 秒。失败的探针记为 `error`，**不扣信任分** —— 上游不稳定不等于兑水
+- **证据门槛**：`error` 不扣分这件事本身可以被利用 —— 一个读过源码的中转站只要把身份、自述、金标、Token 这几项打成超时，剩下的 PASS 就能把分数留在 100。所以清白/可疑判定额外要求两组探针各自至少有一项拿到真实信号：身份组（`identity` / `self_report`）与真实性组（`token_count` / `length` / `golden`）。任一组全军覆没 → 判定强制为"未测出"，绝不是"清白"。报告里的 `criticalErrorRate` 与 `insufficientReason` 就是这个结论的依据
+- 反过来，**已经观测到的铁证不会被沉默洗掉**：身份不符或缓存重放一旦被抓到，即使其余探针全部报错，判定仍然是兑水
 - 关键身份类探针失败会直接判定为**兑水**
 - 成本锚点恒为 `SKIP` —— 纯 API Base/Key 模式下没有可比对的客户价格账本，这一项明确标注而不是静默删掉
 - 批量分数取各模型的算术平均；批量判定取最差的那个模型（兑水 > 可疑 > 未测出 > 清白）
@@ -162,6 +169,10 @@ go run ./cmd/pdf-sample ../tmp/pdfs/sample.pdf
 
 并发是**请求级**的，不是模型级：所有选中的模型同时铺开跑，闸门限制的是同时在飞的上游请求总数，与选了几个模型无关。闸门在 `runner.execute` 里，那是所有请求的唯一出口。默认 2，界面滑条可调到 16。
 
-全选大量模型会产生 `模型数 × 约 63` 次真实上游请求和相应费用 —— 单个模型的缓存率探针就要打 33 次、每次带 16000 字符上下文。先用一两个模型试跑，再决定要不要全量。
+全选大量模型会产生 `模型数 × 约 60` 次真实上游请求和相应费用。**缓存率探针是主要成本来源**：它按 10 档上下文长度（16,000 到 250,000 字符均匀分布）各跑 1 冷 + 2 温三轮，单个模型合计约 **400 万字符 ≈ 100 万 input token**。先用一两个模型试跑，再决定要不要全量。
+
+超长上下文那几档会超出部分模型的窗口上限，这类请求会被上游拒绝并记为 `error`（不扣信任分，但会让缓存率一项判为证据不完整）。
+
+另外注意重试：单个探针失败会重试最多 3 次，**每次尝试都是计费请求**，所以实际账单可能高于「模型数 × 60」。
 
 并发调高会让峰值请求量成倍上升。这时触发的限流可能是并发压出来的，而不是渠道本身的行为，限流契约那一项的结论会因此失真。

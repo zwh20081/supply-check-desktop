@@ -21,7 +21,12 @@ func ListModels(ctx context.Context, request protocol.Request) ([]protocol.Model
 	}
 }
 
-func Complete(ctx context.Context, request protocol.Request) (*protocol.Observation, error) {
+// Complete issues one upstream request. It is a variable rather than a plain
+// function so the batch runner's request-count contract can be verified against
+// a counting stub instead of real (billable) traffic.
+var Complete = completeViaSDK
+
+func completeViaSDK(ctx context.Context, request protocol.Request) (*protocol.Observation, error) {
 	switch request.Credentials.Provider {
 	case "openai":
 		return completeOpenAI(ctx, request)

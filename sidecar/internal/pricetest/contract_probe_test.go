@@ -256,16 +256,22 @@ func TestQuality_UnexpectedToolNameIsHashedBeforeEvidence(t *testing.T) {
 }
 
 func TestProbeRateLimitContractIsPassiveAndValidatesRetryAfter(t *testing.T) {
-	unsupported := ProbeRateLimitContract(RateLimitContractObs{HTTPStatus: 429})
-	require.Equal(t, model.ProbeStatusSkip, unsupported.Status, "a natural 429 without contract headers is unsupported, not guilt")
+	unobservable := ProbeRateLimitContract(RateLimitContractObs{HTTPStatus: 429})
+	require.Equal(t, model.ProbeStatusSkip, unobservable.Status)
+	require.Equal(t, "headers_not_captured_by_auditor", unobservable.Evidence["reason_code"],
+		"without header capture the auditor must blame itself, not claim the upstream lacks the contract")
 
-	pass := ProbeRateLimitContract(RateLimitContractObs{HTTPStatus: 200, Headers: map[string]string{
+	unsupported := ProbeRateLimitContract(RateLimitContractObs{HTTPStatus: 429, HeadersObservable: true})
+	require.Equal(t, model.ProbeStatusSkip, unsupported.Status, "a natural 429 without contract headers is unsupported, not guilt")
+	require.Equal(t, "rate_limit_headers_unsupported", unsupported.Evidence["reason_code"])
+
+	pass := ProbeRateLimitContract(RateLimitContractObs{HTTPStatus: 200, HeadersObservable: true, Headers: map[string]string{
 		"X-RateLimit-Remaining-Requests": "9", "Retry-After": "0",
 	}})
 	require.Equal(t, model.ProbeStatusPass, pass.Status)
 	require.Equal(t, true, pass.Evidence["retry_after_valid"])
 
-	fail := ProbeRateLimitContract(RateLimitContractObs{HTTPStatus: 429, Headers: map[string]string{
+	fail := ProbeRateLimitContract(RateLimitContractObs{HTTPStatus: 429, HeadersObservable: true, Headers: map[string]string{
 		"Retry-After": "not-a-delay",
 	}})
 	require.Equal(t, model.ProbeStatusFail, fail.Status)

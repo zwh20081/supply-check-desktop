@@ -28,7 +28,8 @@ const PROVIDERS: Record<Provider, { label: string; protocol: string; defaultBase
 type TextKey = { [K in keyof Messages]: Messages[K] extends string ? K : never }[keyof Messages];
 
 const BASES_KEY = 'supply-check-bases-v1';
-const REQUESTS_PER_MODEL = 63;
+/** 与侧车 batch.RequestsPerModel 对应：30 基础 + 10 档上下文 × 3 轮缓存率。改这里要同步改那边。 */
+const REQUESTS_PER_MODEL = 60;
 
 /** 侧车已不再夹取并发数，上限完全由这里决定。 */
 const MAX_CONCURRENCY = 16;

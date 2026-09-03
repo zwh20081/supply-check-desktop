@@ -1,10 +1,7 @@
-mod engine;
 mod models;
 mod sdk_bridge;
 
-use models::{
-    BatchReport, HealthReport, ListModelsRequest, ModelInfo, RunAllRequest, RunCheckRequest,
-};
+use models::{BatchReport, ListModelsRequest, ModelInfo, RunAllRequest};
 use std::path::Path;
 use tauri::AppHandle;
 
@@ -12,11 +9,6 @@ use tauri::AppHandle;
 async fn list_models(app: AppHandle, request: ListModelsRequest) -> Result<Vec<ModelInfo>, String> {
     request.credentials.validate()?;
     sdk_bridge::list_models(&app, &request.credentials).await
-}
-
-#[tauri::command]
-async fn run_healthcheck(app: AppHandle, request: RunCheckRequest) -> Result<HealthReport, String> {
-    engine::run(app, request).await
 }
 
 #[tauri::command]
@@ -84,7 +76,6 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             list_models,
-            run_healthcheck,
             run_all_healthchecks,
             cancel_healthcheck,
             open_pdf

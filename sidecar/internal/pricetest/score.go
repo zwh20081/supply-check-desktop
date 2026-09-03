@@ -16,6 +16,20 @@ var configOnlyKinds = map[string]bool{
 	model.ProbeKindRateLimitContract:    true, // a valid header on a 429 must not rescue an otherwise unreachable run
 }
 
+// identityKinds answer "is this actually the model I asked for". A clean
+// verdict may not rest on zero identity evidence.
+var identityKinds = map[string]bool{
+	model.ProbeKindIdentity:   true,
+	model.ProbeKindSelfReport: true,
+}
+
+// authenticityKinds answer "is the served model behaving like the real thing".
+var authenticityKinds = map[string]bool{
+	model.ProbeKindTokenCount: true,
+	model.ProbeKindLength:     true,
+	model.ProbeKindGolden:     true,
+}
+
 // nonScoringKinds provide evidence but can never subtract numeric trust-score
 // points. A concrete protocol contradiction may still cap/override the verdict
 // through the explicit FAIL rules below. Databases may contain stale positive
@@ -77,6 +91,31 @@ func statusPenalty(status string) float64 {
 	}
 }
 
+// Coverage records how much of the suite actually produced a usable signal.
+// It is the audit trail behind an INCONCLUSIVE verdict: a channel that answers
+// nothing must never be reported as clean.
+type Coverage struct {
+	MeasuredLive       int      `json:"measured_live"`
+	IdentityMeasured   int      `json:"identity_measured"`
+	IdentityTotal      int      `json:"identity_total"`
+	AuthenticityMeasr  int      `json:"authenticity_measured"`
+	AuthenticityTotal  int      `json:"authenticity_total"`
+	CriticalErrors     int      `json:"critical_errors"`
+	CriticalTotal      int      `json:"critical_total"`
+	ErroredKinds       []string `json:"errored_kinds,omitempty"`
+	InsufficientReason string   `json:"insufficient_reason,omitempty"`
+}
+
+// CriticalErrorRate is the share of identity+authenticity probes that failed to
+// produce any signal. A hostile relay that stonewalls exactly the probes which
+// would catch it shows up here.
+func (c Coverage) CriticalErrorRate() float64 {
+	if c.CriticalTotal == 0 {
+		return 0
+	}
+	return float64(c.CriticalErrors) / float64(c.CriticalTotal)
+}
+
 // Score computes the per-channel trust score (0–100, higher is cleaner) and the
 // verdict from a run's probe results. weightByKind overrides defaultWeights
 // (pass nil to use defaults). Verdict thresholds:
@@ -88,8 +127,24 @@ func statusPenalty(status string) float64 {
 // the compound of token inflation (P1 fail) AND quality degradation (P4 fail).
 // A single hard FAIL also caps the verdict at SUSPICIOUS.
 func Score(results []model.ProbeResult, weightByKind map[string]int) (int, string) {
+	score, verdict, _ := ScoreWithCoverage(results, weightByKind)
+	return score, verdict
+}
+
+// ScoreWithCoverage is Score plus the evidence-coverage audit trail.
+//
+// Evidence gating: `error` carries no numeric penalty (a flaky upstream is not a
+// watered one), but that alone would let a relay launder a guilty verdict into a
+// clean one by simply refusing the probes that catch it — stonewall P1/P3/P4/P8
+// and the remaining passes leave the score at 100/OK. So a clean or merely
+// suspicious verdict additionally requires that the identity and authenticity
+// probe groups each produced at least one real signal. Failing that, the run is
+// INCONCLUSIVE ("we could not measure this"), never OK.
+func ScoreWithCoverage(results []model.ProbeResult, weightByKind map[string]int) (int, string, Coverage) {
+	coverage := Coverage{}
 	if len(results) == 0 {
-		return 100, model.ProbeVerdictOK
+		coverage.InsufficientReason = "no_results"
+		return 100, model.ProbeVerdictInconclusive, coverage
 	}
 	score := 100.0
 	anyFail := false
@@ -97,21 +152,44 @@ func Score(results []model.ProbeResult, weightByKind map[string]int) (int, strin
 	tokenFail := false
 	goldenFail := false
 	freshnessFail := false
-	// measuredLive counts probes that produced a real signal (pass/warn/fail)
-	// AND actually contacted the upstream. Config-only probes (cost_anchor) are
-	// deliberately excluded: their pass reflects pricing config, not the served
-	// model, so it can't stand in for "we measured the upstream".
-	measuredLive := 0
+	erroredKinds := make([]string, 0, len(results))
 
 	for _, r := range results {
 		w := weightFor(r.Kind, weightByKind)
 		score -= float64(w) * statusPenalty(r.Status)
+
+		critical := identityKinds[r.Kind] || authenticityKinds[r.Kind]
+		if critical {
+			coverage.CriticalTotal++
+		}
+		if identityKinds[r.Kind] {
+			coverage.IdentityTotal++
+		}
+		if authenticityKinds[r.Kind] {
+			coverage.AuthenticityTotal++
+		}
+
 		switch r.Status {
 		case model.ProbeStatusPass, model.ProbeStatusWarn, model.ProbeStatusFail:
 			if !configOnlyKinds[r.Kind] {
-				measuredLive++
+				coverage.MeasuredLive++
+			}
+			if identityKinds[r.Kind] {
+				coverage.IdentityMeasured++
+			}
+			if authenticityKinds[r.Kind] {
+				coverage.AuthenticityMeasr++
+			}
+		default:
+			// error == upstream never answered; skip == not applicable. Neither
+			// proves anything about the served model, so both leave the critical
+			// group uncovered.
+			if critical {
+				coverage.CriticalErrors++
+				erroredKinds = append(erroredKinds, r.Kind)
 			}
 		}
+
 		if r.Status == model.ProbeStatusFail {
 			anyFail = true
 			switch r.Kind {
@@ -126,10 +204,16 @@ func Score(results []model.ProbeResult, weightByKind map[string]int) (int, strin
 			}
 		}
 	}
+	sort.Strings(erroredKinds)
+	coverage.ErroredKinds = erroredKinds
 	if score < 0 {
 		score = 0
 	}
 	intScore := int(score + 0.5)
+
+	// A concrete dilution signal that DID come back stands on its own — refusing
+	// the other probes must never erase a swap we actually observed.
+	hardOverride := identityFail || freshnessFail || (tokenFail && goldenFail)
 
 	// Nothing was actually measured against the upstream — every live probe errored
 	// (upstream unreachable) or was N/A, and any pass came only from a config-only
@@ -137,8 +221,22 @@ func Score(results []model.ProbeResult, weightByKind map[string]int) (int, strin
 	// it would store as OK/100 (error/skip carry no penalty, and a config-only pass
 	// leaves the score at 100) and masquerade as a healthy channel — the observed
 	// gemini-3-flash "errored on every probe yet OK/100" blind spot.
-	if measuredLive == 0 {
-		return intScore, model.ProbeVerdictInconclusive
+	if coverage.MeasuredLive == 0 {
+		coverage.InsufficientReason = "no_live_measurement"
+		return intScore, model.ProbeVerdictInconclusive, coverage
+	}
+
+	// Evidence gating. Checked before the numeric bucket so an unmeasured run can
+	// never present as clean, but AFTER a hard override so real evidence wins.
+	if !hardOverride {
+		switch {
+		case coverage.IdentityTotal > 0 && coverage.IdentityMeasured == 0:
+			coverage.InsufficientReason = "identity_unmeasured"
+			return intScore, model.ProbeVerdictInconclusive, coverage
+		case coverage.AuthenticityTotal > 0 && coverage.AuthenticityMeasr == 0:
+			coverage.InsufficientReason = "authenticity_unmeasured"
+			return intScore, model.ProbeVerdictInconclusive, coverage
+		}
 	}
 
 	verdict := model.ProbeVerdictOK
@@ -149,12 +247,12 @@ func Score(results []model.ProbeResult, weightByKind map[string]int) (int, strin
 		verdict = model.ProbeVerdictSuspicious
 	}
 	// Hard overrides — high-confidence dilution beats the numeric bucket.
-	if identityFail || freshnessFail || (tokenFail && goldenFail) {
+	if hardOverride {
 		verdict = model.ProbeVerdictWatered
 	} else if anyFail && verdict == model.ProbeVerdictOK {
 		verdict = model.ProbeVerdictSuspicious
 	}
-	return intScore, verdict
+	return intScore, verdict, coverage
 }
 
 func weightFor(kind string, override map[string]int) int {

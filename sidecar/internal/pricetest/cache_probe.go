@@ -26,7 +26,6 @@ type CachePhaseObservation struct {
 	CacheTokensSeparate bool
 	TelemetryReported   bool
 	FirstResponseMs     int64
-	UpstreamCostQuota   int
 	Content             string
 	ObservedAt          time.Time
 }
@@ -237,7 +236,6 @@ func cacheSampleEvidence(samples []CachePhaseObservation) []map[string]any {
 			"cache_tokens_separate": sample.CacheTokensSeparate,
 			"telemetry_reported":    sample.TelemetryReported,
 			"first_response_ms":     sample.FirstResponseMs,
-			"upstream_cost":         sample.UpstreamCostQuota,
 			"observed_at_ms":        sample.ObservedAt.UnixMilli(),
 		})
 	}

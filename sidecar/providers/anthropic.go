@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -14,17 +15,25 @@ import (
 	"supply-check-sdk/protocol"
 )
 
-func newAnthropicClient(credentials protocol.Credentials) anthropic.Client {
-	return anthropic.NewClient(
+func newAnthropicClient(credentials protocol.Credentials, recorder *metadataRecorder) anthropic.Client {
+	options := []option.RequestOption{
 		option.WithAPIKey(strings.TrimSpace(credentials.APIKey)),
 		option.WithBaseURL(stripVersionSuffix(credentials.BaseURL, "v1")),
-		option.WithRequestTimeout(300*time.Second),
+		option.WithRequestTimeout(300 * time.Second),
 		option.WithMaxRetries(0),
-	)
+	}
+	if recorder != nil {
+		options = append(options, option.WithMiddleware(func(request *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+			response, err := next(request)
+			recorder.observe(response)
+			return response, err
+		}))
+	}
+	return anthropic.NewClient(options...)
 }
 
 func listAnthropicModels(ctx context.Context, credentials protocol.Credentials) ([]protocol.ModelInfo, error) {
-	client := newAnthropicClient(credentials)
+	client := newAnthropicClient(credentials, nil)
 	page, err := client.Models.List(ctx, anthropic.ModelListParams{Limit: param.NewOpt[int64](1000)})
 	if err != nil {
 		return nil, fmt.Errorf("Anthropic SDK 拉取模型失败: %w", err)
@@ -73,7 +82,8 @@ func completeAnthropic(ctx context.Context, request protocol.Request) (*protocol
 	if request.Stream {
 		return streamAnthropic(ctx, request)
 	}
-	client := newAnthropicClient(request.Credentials)
+	recorder := &metadataRecorder{}
+	client := newAnthropicClient(request.Credentials, recorder)
 	started := time.Now()
 	response, err := client.Messages.New(ctx, anthropicParams(request))
 	requestMs := uint64(time.Since(started).Milliseconds())
@@ -81,6 +91,7 @@ func completeAnthropic(ctx context.Context, request protocol.Request) (*protocol
 		return nil, fmt.Errorf("Anthropic SDK 请求失败: %w", err)
 	}
 	observation := anthropicObservation(response, requestMs)
+	recorder.apply(observation)
 	applyAnthropicToolObservation(observation, response.Content)
 	if request.CacheMode == "on" {
 		observation.ProviderCacheControlApplied = []string{"explicit_on"}
@@ -91,7 +102,8 @@ func completeAnthropic(ctx context.Context, request protocol.Request) (*protocol
 }
 
 func streamAnthropic(ctx context.Context, request protocol.Request) (*protocol.Observation, error) {
-	client := newAnthropicClient(request.Credentials)
+	recorder := &metadataRecorder{}
+	client := newAnthropicClient(request.Credentials, recorder)
 	started := time.Now()
 	stream := client.Messages.NewStreaming(ctx, anthropicParams(request))
 	message := anthropic.Message{}
@@ -112,6 +124,7 @@ func streamAnthropic(ctx context.Context, request protocol.Request) (*protocol.O
 	}
 	first, p50 := streamTiming(started, contentAt)
 	observation := anthropicObservation(&message, uint64(time.Since(started).Milliseconds()))
+	recorder.apply(observation)
 	observation.FirstChunkMs = first
 	observation.InterTokenMsP50 = p50
 	observation.Chunks = len(contentAt)
@@ -134,9 +147,13 @@ func anthropicObservation(response *anthropic.Message, requestMs uint64) *protoc
 		CompletionTokens: nonNegative(usage.OutputTokens),
 		TotalTokens:      nonNegative(usage.InputTokens + usage.OutputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens),
 		CachedTokens:     nonNegative(usage.CacheReadInputTokens), CacheCreationTokens: nonNegative(usage.CacheCreationInputTokens),
-		FinishReason: string(response.StopReason), StopReason: string(response.StopReason), RequestMs: requestMs,
+		// output_tokens stays the authoritative billed total; thinking_tokens is a
+		// read-only decomposition of the part that was never returned as text.
+		ReasoningTokens:   nonNegative(usage.OutputTokensDetails.ThinkingTokens),
+		ReasoningReported: usage.JSON.OutputTokensDetails.Valid(),
+		FinishReason:      string(response.StopReason), StopReason: string(response.StopReason), RequestMs: requestMs,
 		UsageReported: response.JSON.Usage.Valid(), CacheTelemetryReported: usage.JSON.CacheReadInputTokens.Valid() || usage.JSON.CacheCreationInputTokens.Valid(),
-		MessageID: response.ID, ContentType: "application/json", Endpoint: "/v1/messages", HTTPStatus: 200,
+		MessageID: response.ID, ContentType: "application/json", Endpoint: "/v1/messages",
 		ResponseFormat: "anthropic_messages", ProtocolValid: true, TransportContextBound: true,
 	}
 }

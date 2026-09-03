@@ -82,6 +82,22 @@ type LengthObs struct {
 	CompletionTokens int
 	LocalRecount     int // local token count of the returned text
 	ContentOK        bool
+	// ReasoningTokens is the portion of CompletionTokens the provider spent on
+	// internal reasoning/thinking that never appears in the returned text. It is
+	// billed but not recountable, so it must be subtracted before comparing the
+	// completion count to a recount of the visible answer. OpenAI reports it in
+	// completion_tokens_details.reasoning_tokens, Anthropic in
+	// output_tokens_details.thinking_tokens, Gemini in thoughtsTokenCount.
+	ReasoningTokens int
+	// ReasoningReported distinguishes "provider says zero" from "provider does
+	// not expose the field".
+	ReasoningReported bool
+	// ReasoningCapable is true only for model families that can actually spend
+	// unreturned reasoning tokens (o-series/GPT-5, Claude thinking, Gemini
+	// thoughts). It gates the benefit of the doubt: on a model that cannot
+	// reason, a large completion-vs-text gap has no innocent explanation, so
+	// missing telemetry must not launder padding into a mere WARN.
+	ReasoningCapable bool
 	// IsOpenAIFamily gates the FAIL verdict, exactly like ProbeTokenCount: the
 	// local recount uses tiktoken, faithful only for OpenAI-family models. For
 	// Anthropic / Gemini / others the model's real completion_tokens legitimately
@@ -99,23 +115,42 @@ func ProbeLength(spec model.ProbeSpec, obs LengthObs) model.ProbeResult {
 		res.Evidence = map[string]any{"reason": "missing completion counts"}
 		return res
 	}
-	ratio := float64(obs.CompletionTokens) / float64(obs.LocalRecount)
+	// Reasoning tokens are billed output that is deliberately not returned, so
+	// they can never be recounted from the text. Compare only the visible part.
+	visibleTokens := obs.CompletionTokens - obs.ReasoningTokens
+	if visibleTokens < 0 {
+		visibleTokens = 0
+	}
+	ratio := float64(visibleTokens) / float64(obs.LocalRecount)
 	tol := valOr(spec.TolerancePct, 25) / 100
 	res.Evidence = map[string]any{
-		"completion_tokens": obs.CompletionTokens,
-		"local_recount":     obs.LocalRecount,
-		"ratio":             round4(ratio),
-		"content_ok":        obs.ContentOK,
-		"openai_family":     obs.IsOpenAIFamily,
+		"completion_tokens":  obs.CompletionTokens,
+		"reasoning_tokens":   obs.ReasoningTokens,
+		"reasoning_reported": obs.ReasoningReported,
+		"reasoning_capable":  obs.ReasoningCapable,
+		"visible_tokens":     visibleTokens,
+		"local_recount":      obs.LocalRecount,
+		"ratio":              round4(ratio),
+		"content_ok":         obs.ContentOK,
+		"openai_family":      obs.IsOpenAIFamily,
 	}
 	if obs.IsOpenAIFamily {
 		res.Evidence["comparison_confidence"] = "exact_tokenizer_family"
 	} else {
 		res.Evidence["comparison_confidence"] = "estimated_cross_tokenizer"
 	}
+	// On a reasoning-capable model that did not report its reasoning split, an
+	// unexplained gap is genuinely ambiguous — undisclosed thinking looks exactly
+	// like padding. Say "inconclusive" rather than convict. A model that cannot
+	// reason gets no such excuse.
+	unexplainedReasoning := ratio > 1+tol && obs.ReasoningCapable && !obs.ReasoningReported && obs.ReasoningTokens == 0
 	switch {
+	case unexplainedReasoning:
+		res.Status = model.ProbeStatusWarn
+		res.Evidence["reason_code"] = "completion_gap_without_reasoning_telemetry"
 	case ratio > 1+tol && obs.IsOpenAIFamily:
 		res.Status = model.ProbeStatusFail // server-side padding of completion tokens
+		res.Evidence["reason_code"] = "completion_padding"
 	case ratio > 1+tol:
 		// Non-OpenAI tokenizer mismatch — flag but don't convict.
 		res.Status = model.ProbeStatusWarn
@@ -314,7 +349,7 @@ var wrapperMarkers = []string{
 	"codeium", "github copilot", "microsoft copilot", "copilot", "sourcegraph", "cody",
 	"tabnine", "augment", "trae", "amazon q", "q developer",
 	"supermaven", "devin", "bolt.new", "lovable", "poe", "phind",
-	"you.com", "perplexity",
+	"you.com", "perplexity", "antigravity",
 }
 
 // These product names are also ordinary English words or personal names. A
@@ -323,7 +358,7 @@ var wrapperMarkers = []string{
 var ambiguousWrapperMarkers = map[string]bool{
 	"cursor": true, "windsurf": true, "copilot": true, "cody": true,
 	"augment": true, "trae": true, "devin": true, "lovable": true,
-	"poe": true, "perplexity": true,
+	"poe": true, "perplexity": true, "antigravity": true,
 }
 
 const redactedSelfReport = "[redacted upstream self-report]"

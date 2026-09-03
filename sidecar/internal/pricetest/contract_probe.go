@@ -52,11 +52,8 @@ func ProbeProtocolContract(obs ProtocolContractObs) model.ProbeResult {
 }
 
 func contractEvidenceText(value string) string {
-	value = common.MaskSensitiveInfo(value)
-	if len(value) > 200 {
-		return value[:200]
-	}
-	return value
+	// Rune-bounded: byte slicing would cut a multi-byte character in half.
+	return common.TruncateRunes(common.MaskSensitiveInfo(value), 200)
 }
 
 type StreamIntegrityObs struct {
@@ -120,7 +117,20 @@ type UsageReconciliationObs struct {
 	// CacheTokensSeparate is true when cached input is reported alongside,
 	// rather than inside, PromptTokens (Anthropic /v1/messages semantics).
 	CacheTokensSeparate bool
-	CostQuota           int
+	// ReasoningTokens is unreturned billed output. It is already inside
+	// CompletionTokens for OpenAI and Anthropic, but sits OUTSIDE the candidates
+	// count for Gemini — see ReasoningOutsideCompletion.
+	ReasoningTokens int
+	// ToolUsePromptTokens is Gemini-only billed input from tool results, counted
+	// outside PromptTokens.
+	ToolUsePromptTokens int
+	// ReasoningOutsideCompletion selects the total-token identity to assert.
+	// False (OpenAI/Anthropic): total == prompt + completion.
+	// True  (Gemini):           total == prompt + candidates + toolUsePrompt + thoughts.
+	// Asserting the two-part identity against Gemini fails every thinking
+	// request, so the provider's own accounting model must drive the check.
+	ReasoningOutsideCompletion bool
+	CostQuota                  int
 }
 
 // ProbeUsageReconciliation (P12) validates provider usage accounting from the
@@ -128,15 +138,23 @@ type UsageReconciliationObs struct {
 // neutral; only provider-reported contradictions fail.
 func ProbeUsageReconciliation(obs UsageReconciliationObs) model.ProbeResult {
 	result := model.ProbeResult{ProbeKey: "p12_usage_reconciliation", Kind: model.ProbeKindUsageReconciliation}
+	expectedTotal := obs.PromptTokens + obs.CompletionTokens
+	if obs.ReasoningOutsideCompletion {
+		expectedTotal += obs.ToolUsePromptTokens + obs.ReasoningTokens
+	}
 	result.Evidence = map[string]any{
-		"usage_reported":        obs.Reported,
-		"prompt_tokens":         obs.PromptTokens,
-		"completion_tokens":     obs.CompletionTokens,
-		"total_tokens":          obs.TotalTokens,
-		"cached_tokens":         obs.CachedTokens,
-		"cache_creation_tokens": obs.CacheCreationTokens,
-		"cache_tokens_separate": obs.CacheTokensSeparate,
-		"cost_quota":            obs.CostQuota,
+		"usage_reported":         obs.Reported,
+		"prompt_tokens":          obs.PromptTokens,
+		"completion_tokens":      obs.CompletionTokens,
+		"total_tokens":           obs.TotalTokens,
+		"cached_tokens":          obs.CachedTokens,
+		"cache_creation_tokens":  obs.CacheCreationTokens,
+		"cache_tokens_separate":  obs.CacheTokensSeparate,
+		"reasoning_tokens":       obs.ReasoningTokens,
+		"tool_use_prompt_tokens": obs.ToolUsePromptTokens,
+		"expected_total_tokens":  expectedTotal,
+		"total_token_model":      usageTotalModel(obs.ReasoningOutsideCompletion),
+		"cost_quota":             obs.CostQuota,
 	}
 	if !obs.Reported {
 		result.Status = model.ProbeStatusSkip
@@ -144,13 +162,18 @@ func ProbeUsageReconciliation(obs UsageReconciliationObs) model.ProbeResult {
 		return result
 	}
 	switch {
-	case obs.PromptTokens < 0 || obs.CompletionTokens < 0 || obs.TotalTokens < 0 || obs.CachedTokens < 0 || obs.CacheCreationTokens < 0 || obs.CostQuota < 0:
+	case obs.PromptTokens < 0 || obs.CompletionTokens < 0 || obs.TotalTokens < 0 || obs.CachedTokens < 0 || obs.CacheCreationTokens < 0 || obs.ReasoningTokens < 0 || obs.ToolUsePromptTokens < 0 || obs.CostQuota < 0:
 		result.Status = model.ProbeStatusFail
 		result.Evidence["reason_code"] = "negative_usage"
 	case !obs.CacheTokensSeparate && obs.CachedTokens > obs.PromptTokens:
 		result.Status = model.ProbeStatusFail
 		result.Evidence["reason_code"] = "cached_tokens_exceed_prompt"
-	case obs.TotalTokens > 0 && obs.TotalTokens != obs.PromptTokens+obs.CompletionTokens:
+	case !obs.ReasoningOutsideCompletion && obs.ReasoningTokens > obs.CompletionTokens:
+		// Reasoning is a subset of billed output for these providers; more
+		// reasoning than output is an arithmetic impossibility.
+		result.Status = model.ProbeStatusFail
+		result.Evidence["reason_code"] = "reasoning_exceeds_completion"
+	case obs.TotalTokens > 0 && obs.TotalTokens != expectedTotal:
 		result.Status = model.ProbeStatusFail
 		result.Evidence["reason_code"] = "total_tokens_mismatch"
 	default:
@@ -159,18 +182,38 @@ func ProbeUsageReconciliation(obs UsageReconciliationObs) model.ProbeResult {
 	return result
 }
 
+func usageTotalModel(reasoningOutside bool) string {
+	if reasoningOutside {
+		return "prompt+candidates+tool_use+thoughts"
+	}
+	return "prompt+completion"
+}
+
 type CancellationContractObs struct {
+	// CarrierObserved is true when an ordinary suite request succeeded, proving
+	// there is a real transport to reason about.
 	CarrierObserved bool
-	ContextBound    bool
+	// ContextBound is true when that transport was created with the suite's
+	// cancellable context, so aborting the job really aborts in-flight upstream
+	// calls. It is reported by the provider layer per request — passing the same
+	// value as CarrierObserved would make this probe a tautology that can only
+	// ever say "a request succeeded".
+	ContextBound bool
 }
 
 // ProbeCancellationContract (P13) is passive: it reports whether an existing
 // carrier request bound the suite context to the real upstream transport. It
-// deliberately does not create or cancel a paid long-running request.
+// deliberately does not create or cancel a paid long-running request, so it
+// verifies wiring rather than observed cancellation behaviour — which is why
+// the scorer treats it as config-only and non-scoring.
 func ProbeCancellationContract(obs CancellationContractObs) model.ProbeResult {
 	result := model.ProbeResult{
 		ProbeKey: "p13_cancellation_contract", Kind: model.ProbeKindCancellationContract,
-		Evidence: map[string]any{"carrier_observed": obs.CarrierObserved, "transport_context_bound": obs.ContextBound},
+		Evidence: map[string]any{
+			"carrier_observed":        obs.CarrierObserved,
+			"transport_context_bound": obs.ContextBound,
+			"scope":                   "local_transport_wiring_only",
+		},
 	}
 	if !obs.CarrierObserved {
 		result.Status = model.ProbeStatusSkip
@@ -459,6 +502,11 @@ func sanitizedToolFieldName(value string) string {
 type RateLimitContractObs struct {
 	HTTPStatus int
 	Headers    map[string]string
+	// HeadersObservable reports whether the transport layer actually attempted
+	// to capture response headers. When false, an empty header map says nothing
+	// about the upstream — it is the auditor's own blind spot, and reporting it
+	// as "upstream unsupported" would be a false statement about the channel.
+	HeadersObservable bool
 }
 
 // ProbeRateLimitContract (P15) consumes headers from an already-issued request
@@ -479,10 +527,16 @@ func ProbeRateLimitContract(obs RateLimitContractObs) model.ProbeResult {
 	result := model.ProbeResult{
 		ProbeKey: "p15_rate_limit_contract", Kind: model.ProbeKindRateLimitContract,
 		Evidence: map[string]any{
-			"http_status":  obs.HTTPStatus,
-			"header_count": len(headerNames),
-			"header_names": headerNames,
+			"http_status":        obs.HTTPStatus,
+			"header_count":       len(headerNames),
+			"header_names":       headerNames,
+			"headers_observable": obs.HeadersObservable,
 		},
+	}
+	if !obs.HeadersObservable {
+		result.Status = model.ProbeStatusSkip
+		result.Evidence["reason_code"] = "headers_not_captured_by_auditor"
+		return result
 	}
 	if len(headerNames) == 0 {
 		result.Status = model.ProbeStatusSkip

@@ -39,7 +39,16 @@ type Observation struct {
 	TotalTokens                 uint64            `json:"totalTokens"`
 	CachedTokens                uint64            `json:"cachedTokens"`
 	CacheCreationTokens         uint64            `json:"cacheCreationTokens"`
-	FinishReason                string            `json:"finishReason"`
+	// ReasoningTokens is billed output the provider spent on internal reasoning
+	// and did not return. It is a subset of CompletionTokens for every provider
+	// here, so it must be subtracted before the visible text is recounted.
+	ReasoningTokens uint64 `json:"reasoningTokens"`
+	// ReasoningReported separates "reported as zero" from "field absent".
+	ReasoningReported bool `json:"reasoningReported"`
+	// ToolUsePromptTokens is Gemini-only billed input from tool results. It sits
+	// outside PromptTokens and is needed to reconcile totalTokenCount.
+	ToolUsePromptTokens uint64 `json:"toolUsePromptTokens"`
+	FinishReason        string `json:"finishReason"`
 	RequestMs                   uint64            `json:"requestMs"`
 	FirstChunkMs                uint64            `json:"firstChunkMs"`
 	InterTokenMsP50             float64           `json:"interTokenMsP50"`
@@ -90,6 +99,14 @@ type ModelReport struct {
 	DurationMs       int64         `json:"durationMs"`
 	Error            string        `json:"error,omitempty"`
 	Results          []ProbeResult `json:"results"`
+	// Evidence coverage. CriticalErrorRate is the share of identity and
+	// authenticity probes that produced no signal; a channel that stonewalls
+	// exactly those probes is INCONCLUSIVE, and InsufficientReason says which
+	// group was left unmeasured.
+	CriticalErrorRate  float64 `json:"criticalErrorRate"`
+	CriticalErrors     int     `json:"criticalErrors"`
+	CriticalProbes     int     `json:"criticalProbes"`
+	InsufficientReason string  `json:"insufficientReason,omitempty"`
 }
 
 type BatchReport struct {

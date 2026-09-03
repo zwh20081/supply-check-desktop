@@ -75,13 +75,13 @@ var hiddenPromptInstructionPattern = regexp.MustCompile(`(?i)(?:` +
 
 // hidden_prompt is deliberately absent: the JSON probe itself asks the model
 // to use that key, so its presence says nothing about whether the value leaked.
-// Reuse the self-report probe's Unicode-aware boundary matcher so wrapper
-// names embedded in ordinary Latin or non-Latin words are not disclosures.
-var promptLeakWrapperMarkers = []string{"kiro", "cursor", "cline", "windsurf", "antigravity"}
+// The wrapper vocabulary is shared with the self-report probe (P8) — keeping a
+// second, shorter list here meant P16 silently missed most of the wrappers P8
+// could already name. Reuse the Unicode-aware boundary matcher too, so wrapper
+// names embedded in ordinary words are not treated as disclosures.
+var promptLeakWrapperMarkers = wrapperMarkers
 
-var ambiguousPromptLeakWrapperMarkers = map[string]bool{
-	"cursor": true, "windsurf": true, "antigravity": true,
-}
+var ambiguousPromptLeakWrapperMarkers = ambiguousWrapperMarkers
 
 // hiddenPromptJSONKeyPattern is intentionally narrower than a plain
 // "hidden_prompt" search: it requires the token to look like an object key.

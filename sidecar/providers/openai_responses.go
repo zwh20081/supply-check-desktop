@@ -57,7 +57,8 @@ func completeOpenAIResponses(ctx context.Context, request protocol.Request) (*pr
 	if request.Stream {
 		return streamOpenAIResponses(ctx, request)
 	}
-	client := newOpenAIClient(request.Credentials)
+	recorder := &metadataRecorder{}
+	client := newOpenAIClient(request.Credentials, recorder)
 	started := time.Now()
 	response, err := client.Responses.New(ctx, responsesParams(request))
 	requestMs := uint64(time.Since(started).Milliseconds())
@@ -65,6 +66,7 @@ func completeOpenAIResponses(ctx context.Context, request protocol.Request) (*pr
 		return nil, fmt.Errorf("OpenAI Responses SDK 请求失败: %w", err)
 	}
 	observation := responsesObservation(response, response.OutputText(), requestMs)
+	recorder.apply(observation)
 	if request.CacheKey != "" {
 		observation.ProviderCacheControlApplied = []string{"key_partition"}
 	}
@@ -73,7 +75,8 @@ func completeOpenAIResponses(ctx context.Context, request protocol.Request) (*pr
 }
 
 func streamOpenAIResponses(ctx context.Context, request protocol.Request) (*protocol.Observation, error) {
-	client := newOpenAIClient(request.Credentials)
+	recorder := &metadataRecorder{}
+	client := newOpenAIClient(request.Credentials, recorder)
 	started := time.Now()
 	stream := client.Responses.NewStreaming(ctx, responsesParams(request))
 
@@ -117,6 +120,7 @@ func streamOpenAIResponses(ctx context.Context, request protocol.Request) (*prot
 	}
 	first, p50 := streamTiming(started, contentAt)
 	observation := responsesObservation(final, content, uint64(time.Since(started).Milliseconds()))
+	recorder.apply(observation)
 	observation.FirstChunkMs = first
 	observation.InterTokenMsP50 = p50
 	observation.Chunks = len(contentAt)
@@ -140,16 +144,18 @@ func responsesObservation(response *responses.Response, content string, requestM
 		TotalTokens:         nonNegative(usage.TotalTokens),
 		CachedTokens:        nonNegative(usage.InputTokensDetails.CachedTokens),
 		CacheCreationTokens: nonNegative(usage.InputTokensDetails.CacheWriteTokens),
-		FinishReason:        string(response.Status),
-		StopReason:          string(response.Status),
-		RequestMs:           requestMs,
-		UsageReported:       usage.JSON.InputTokens.Valid() || usage.JSON.TotalTokens.Valid(),
+		// Responses bills reasoning inside output_tokens without returning it.
+		ReasoningTokens:   nonNegative(usage.OutputTokensDetails.ReasoningTokens),
+		ReasoningReported: usage.JSON.OutputTokensDetails.Valid(),
+		FinishReason:      string(response.Status),
+		StopReason:        string(response.Status),
+		RequestMs:         requestMs,
+		UsageReported:     usage.JSON.InputTokens.Valid() || usage.JSON.TotalTokens.Valid(),
 		// Responses 把缓存计数放在 input_tokens_details 下
 		CacheTelemetryReported: usage.JSON.InputTokensDetails.Valid(),
 		MessageID:              response.ID,
 		ContentType:            "application/json",
 		Endpoint:               "/v1/responses",
-		HTTPStatus:             200,
 		ResponseFormat:         "openai_responses",
 		ProtocolValid:          true,
 		TransportContextBound:  true,

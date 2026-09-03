@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -13,13 +14,22 @@ import (
 	"supply-check-sdk/protocol"
 )
 
-func newGoogleClient(ctx context.Context, credentials protocol.Credentials) (*genai.Client, error) {
+func newGoogleClient(ctx context.Context, credentials protocol.Credentials, recorder *metadataRecorder) (*genai.Client, error) {
 	baseURL, version := splitGoogleBaseURL(credentials.BaseURL)
 	timeout := 300 * time.Second
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+	config := &genai.ClientConfig{
 		APIKey: strings.TrimSpace(credentials.APIKey), Backend: genai.BackendGeminiAPI,
 		HTTPOptions: genai.HTTPOptions{BaseURL: baseURL, APIVersion: version, Timeout: &timeout},
-	})
+	}
+	// genai takes a custom *http.Client rather than SDK middleware, so the real
+	// status and rate-limit headers are captured at the RoundTripper layer.
+	if recorder != nil {
+		config.HTTPClient = &http.Client{
+			Timeout:   timeout,
+			Transport: &roundTripRecorder{recorder: recorder},
+		}
+	}
+	client, err := genai.NewClient(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("创建 Google Gen AI SDK 客户端失败: %w", err)
 	}
@@ -27,7 +37,7 @@ func newGoogleClient(ctx context.Context, credentials protocol.Credentials) (*ge
 }
 
 func listGoogleModels(ctx context.Context, credentials protocol.Credentials) ([]protocol.ModelInfo, error) {
-	client, err := newGoogleClient(ctx, credentials)
+	client, err := newGoogleClient(ctx, credentials, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +95,8 @@ func completeGoogle(ctx context.Context, request protocol.Request) (*protocol.Ob
 	if request.Stream {
 		return streamGoogle(ctx, request)
 	}
-	client, err := newGoogleClient(ctx, request.Credentials)
+	recorder := &metadataRecorder{}
+	client, err := newGoogleClient(ctx, request.Credentials, recorder)
 	if err != nil {
 		return nil, err
 	}
@@ -96,12 +107,14 @@ func completeGoogle(ctx context.Context, request protocol.Request) (*protocol.Ob
 		return nil, fmt.Errorf("Google Gen AI SDK 请求失败: %w", err)
 	}
 	observation := googleObservation(response, requestMs)
+	recorder.apply(observation)
 	applyGoogleToolObservation(observation, response.FunctionCalls())
 	return observation, nil
 }
 
 func streamGoogle(ctx context.Context, request protocol.Request) (*protocol.Observation, error) {
-	client, err := newGoogleClient(ctx, request.Credentials)
+	recorder := &metadataRecorder{}
+	client, err := newGoogleClient(ctx, request.Credentials, recorder)
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +142,7 @@ func streamGoogle(ctx context.Context, request protocol.Request) (*protocol.Obse
 	}
 	first, p50 := streamTiming(started, contentAt)
 	observation := googleObservation(last, uint64(time.Since(started).Milliseconds()))
+	recorder.apply(observation)
 	observation.Content = content.String()
 	observation.FirstChunkMs = first
 	observation.InterTokenMsP50 = p50
@@ -143,7 +157,7 @@ func googleObservation(response *genai.GenerateContentResponse, requestMs uint64
 	observation := &protocol.Observation{
 		Content: response.Text(), UpstreamModel: strings.TrimPrefix(response.ModelVersion, "models/"), RequestMs: requestMs,
 		MessageID: response.ResponseID, ContentType: "application/json", Endpoint: "/v1beta/models:generateContent",
-		HTTPStatus: 200, ResponseFormat: "google_generate_content", ProtocolValid: true, TransportContextBound: true,
+		ResponseFormat: "google_generate_content", ProtocolValid: true, TransportContextBound: true,
 	}
 	if response.UsageMetadata != nil {
 		usage := response.UsageMetadata
@@ -151,8 +165,18 @@ func googleObservation(response *genai.GenerateContentResponse, requestMs uint64
 		observation.CompletionTokens = uint64(max(usage.CandidatesTokenCount, 0))
 		observation.TotalTokens = uint64(max(usage.TotalTokenCount, 0))
 		observation.CachedTokens = uint64(max(usage.CachedContentTokenCount, 0))
+		// thoughtsTokenCount is billed but sits OUTSIDE candidatesTokenCount, so
+		// Gemini's totalTokenCount is prompt+candidates+toolUsePrompt+thoughts.
+		// Carrying both lets P2 skip unreturned reasoning and P12 reconcile the
+		// four-part total instead of asserting a two-part one.
+		observation.ReasoningTokens = uint64(max(usage.ThoughtsTokenCount, 0))
+		observation.ToolUsePromptTokens = uint64(max(usage.ToolUsePromptTokenCount, 0))
+		observation.ReasoningReported = usage.ThoughtsTokenCount > 0
 		observation.UsageReported = true
-		observation.CacheTelemetryReported = usage.CachedContentTokenCount > 0 || len(usage.CacheTokensDetails) > 0
+		// A cache field present but zero means "no hit", which is different from a
+		// provider that never reports cache telemetry at all. CacheTokensDetails
+		// presence is the capability signal; the count alone is not.
+		observation.CacheTelemetryReported = len(usage.CacheTokensDetails) > 0 || usage.CachedContentTokenCount > 0
 	}
 	if len(response.Candidates) > 0 && response.Candidates[0] != nil {
 		observation.FinishReason = string(response.Candidates[0].FinishReason)

@@ -31,8 +31,12 @@ func TestCompleteSuiteContract(t *testing.T) {
 	if got := len(definitions()); got != 22 {
 		t.Fatalf("complete suite should expose 22 results, got %d", got)
 	}
-	if RequestsPerModel != 60 {
-		t.Fatalf("complete suite request estimate changed: %d", RequestsPerModel)
+	// The request count itself is verified by COUNTING real execute() calls in
+	// request_contract_test.go. Asserting the constant here would only restate
+	// its own arithmetic (30 + 10*3 == 60), which is how the frontend was able
+	// to drift to 63 unnoticed.
+	if RequestsPerModel != baseRequestsPerModel+cacheRateVariants*(cacheRateWarmLoops+1) {
+		t.Fatalf("RequestsPerModel no longer matches its own composition: %d", RequestsPerModel)
 	}
 }
 

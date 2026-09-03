@@ -6,3 +6,6 @@
 /src-tauri/gen/schemas
 *.log
 .DS_Store
+
+# autoresearch 会话产物（审查/修复报告），不作为项目资产提交
+/autoresearch

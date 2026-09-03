@@ -14,15 +14,6 @@ pub enum Provider {
 }
 
 impl Provider {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Openai => "OpenAI",
-            Self::OpenaiResponses => "OpenAI Responses",
-            Self::Anthropic => "Claude",
-            Self::Google => "Google",
-        }
-    }
-
     /// 用于文件名：不含空格，避免路径里出现 "OpenAI Responses"。
     pub fn slug(&self) -> &'static str {
         match self {
@@ -34,12 +25,25 @@ impl Provider {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Credentials {
     pub provider: Provider,
     pub base_url: String,
     pub api_key: String,
+}
+
+// Debug 手写而非 derive：派生实现会把 api_key 原样打出来，而 Debug 输出会进
+// 日志、panic 信息和 `{:?}` 格式化的错误串。密钥只应该走 stdin 到侧车。
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Credentials")
+            .field("provider", &self.provider)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[redacted]")
+            .finish()
+    }
 }
 
 impl Credentials {
@@ -71,34 +75,6 @@ pub struct ModelInfo {
     pub id: String,
     pub name: String,
     pub owned_by: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct CompletionRequest<'a> {
-    pub credentials: &'a Credentials,
-    pub model: &'a str,
-    pub prompt: &'a str,
-    pub system_prompt: Option<&'a str>,
-    pub max_tokens: u32,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct CompletionObservation {
-    pub content: String,
-    pub upstream_model: String,
-    pub system_fingerprint: String,
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub finish_reason: String,
-    pub request_ms: u64,
-    pub usage_reported: bool,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunCheckRequest {
-    pub credentials: Credentials,
-    pub model: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -152,6 +128,16 @@ pub struct ModelReport {
     #[serde(default)]
     pub error: String,
     pub results: Vec<BatchProbeResult>,
+    /// 证据覆盖率。渠道把关键探针打成报错时，判定必须显式落到"未测出"，
+    /// 这几个字段是那个结论的依据，不能在传输层被丢掉。
+    #[serde(default)]
+    pub critical_error_rate: f64,
+    #[serde(default)]
+    pub critical_errors: usize,
+    #[serde(default)]
+    pub critical_probes: usize,
+    #[serde(default)]
+    pub insufficient_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -173,73 +159,4 @@ pub struct BatchReport {
     pub verdict: String,
     pub pdf_path: String,
     pub models: Vec<ModelReport>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProbeResult {
-    pub key: String,
-    pub kind: String,
-    pub label: String,
-    pub description: String,
-    pub status: String,
-    pub weight: u32,
-    pub duration_ms: u64,
-    pub evidence: BTreeMap<String, Value>,
-}
-
-impl ProbeResult {
-    pub fn new(
-        key: &str,
-        kind: &str,
-        label: &str,
-        description: &str,
-        status: &str,
-        weight: u32,
-    ) -> Self {
-        Self {
-            key: key.to_string(),
-            kind: kind.to_string(),
-            label: label.to_string(),
-            description: description.to_string(),
-            status: status.to_string(),
-            weight,
-            duration_ms: 0,
-            evidence: BTreeMap::new(),
-        }
-    }
-
-    pub fn error(
-        key: &str,
-        kind: &str,
-        label: &str,
-        description: &str,
-        weight: u32,
-        error: String,
-    ) -> Self {
-        let mut result = Self::new(key, kind, label, description, "error", weight);
-        result
-            .evidence
-            .insert("error".to_string(), Value::String(error));
-        result
-    }
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HealthReport {
-    pub id: String,
-    pub provider: Provider,
-    pub provider_label: String,
-    pub base_url: String,
-    pub model: String,
-    pub started_at: String,
-    pub finished_at: String,
-    pub duration_ms: u64,
-    pub trust_score: u32,
-    pub verdict: String,
-    pub request_count: u32,
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub results: Vec<ProbeResult>,
 }
