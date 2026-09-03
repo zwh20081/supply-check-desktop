@@ -1,6 +1,6 @@
 [package]
 name = "supply-check-desktop"
-version = "0.1.4"
+version = "0.1.5"
 description = "Standalone AI supply health-check desktop app"
 authors = ["Supply Check Desktop contributors"]
 edition = "2021"

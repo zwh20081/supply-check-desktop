@@ -89,15 +89,11 @@ type LengthObs struct {
 	// completion_tokens_details.reasoning_tokens, Anthropic in
 	// output_tokens_details.thinking_tokens, Gemini in thoughtsTokenCount.
 	ReasoningTokens int
-	// ReasoningReported distinguishes "provider says zero" from "provider does
-	// not expose the field".
+	// ReasoningReported separates "reported as zero" from "field absent". It is
+	// evidence only — the verdict never branches on it, because guessing which
+	// model families can reason (by name) misjudges renamed or new models, and a
+	// wrong guess here convicts an honest channel.
 	ReasoningReported bool
-	// ReasoningCapable is true only for model families that can actually spend
-	// unreturned reasoning tokens (o-series/GPT-5, Claude thinking, Gemini
-	// thoughts). It gates the benefit of the doubt: on a model that cannot
-	// reason, a large completion-vs-text gap has no innocent explanation, so
-	// missing telemetry must not launder padding into a mere WARN.
-	ReasoningCapable bool
 	// IsOpenAIFamily gates the FAIL verdict, exactly like ProbeTokenCount: the
 	// local recount uses tiktoken, faithful only for OpenAI-family models. For
 	// Anthropic / Gemini / others the model's real completion_tokens legitimately
@@ -116,7 +112,9 @@ func ProbeLength(spec model.ProbeSpec, obs LengthObs) model.ProbeResult {
 		return res
 	}
 	// Reasoning tokens are billed output that is deliberately not returned, so
-	// they can never be recounted from the text. Compare only the visible part.
+	// they can never be recounted from the text. Subtracting the reported figure
+	// is pure arithmetic — no inference about the model — and is what stops a
+	// reasoning model from looking like it pads completion tokens.
 	visibleTokens := obs.CompletionTokens - obs.ReasoningTokens
 	if visibleTokens < 0 {
 		visibleTokens = 0
@@ -127,7 +125,6 @@ func ProbeLength(spec model.ProbeSpec, obs LengthObs) model.ProbeResult {
 		"completion_tokens":  obs.CompletionTokens,
 		"reasoning_tokens":   obs.ReasoningTokens,
 		"reasoning_reported": obs.ReasoningReported,
-		"reasoning_capable":  obs.ReasoningCapable,
 		"visible_tokens":     visibleTokens,
 		"local_recount":      obs.LocalRecount,
 		"ratio":              round4(ratio),
@@ -139,15 +136,7 @@ func ProbeLength(spec model.ProbeSpec, obs LengthObs) model.ProbeResult {
 	} else {
 		res.Evidence["comparison_confidence"] = "estimated_cross_tokenizer"
 	}
-	// On a reasoning-capable model that did not report its reasoning split, an
-	// unexplained gap is genuinely ambiguous — undisclosed thinking looks exactly
-	// like padding. Say "inconclusive" rather than convict. A model that cannot
-	// reason gets no such excuse.
-	unexplainedReasoning := ratio > 1+tol && obs.ReasoningCapable && !obs.ReasoningReported && obs.ReasoningTokens == 0
 	switch {
-	case unexplainedReasoning:
-		res.Status = model.ProbeStatusWarn
-		res.Evidence["reason_code"] = "completion_gap_without_reasoning_telemetry"
 	case ratio > 1+tol && obs.IsOpenAIFamily:
 		res.Status = model.ProbeStatusFail // server-side padding of completion tokens
 		res.Evidence["reason_code"] = "completion_padding"

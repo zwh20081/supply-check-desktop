@@ -180,8 +180,7 @@ func (r *runner) runModel(ctx context.Context, modelName string, index, totalMod
 			pricetest.ProbeLength(specLength(), pricetest.LengthObs{
 				CompletionTokens: int(streamObs.CompletionTokens), LocalRecount: service.CountTextToken(streamObs.Content, modelName),
 				ReasoningTokens: int(streamObs.ReasoningTokens), ReasoningReported: streamObs.ReasoningReported,
-				ReasoningCapable: reasoningCapableModel(r.credentials.Provider, modelName),
-				ContentOK:        sequenceOK(streamObs.Content), IsOpenAIFamily: isOpenAIFamily(r.credentials.Provider),
+				ContentOK: sequenceOK(streamObs.Content), IsOpenAIFamily: isOpenAIFamily(r.credentials.Provider),
 			}),
 			pricetest.ProbeLatency(model.ProbeSpec{Stream: true}, pricetest.LatencyObs{
 				FirstResponseMs: int64(streamObs.RequestMs), TokensPerSec: tokensPerSecond(streamObs), Streamed: true,
@@ -668,25 +667,6 @@ func usageResult(obs *protocol.Observation, provider string) model.ProbeResult {
 	})
 }
 
-// reasoningCapableModel reports whether the model family can spend billed
-// reasoning tokens that never appear in the response text. Only these families
-// get the benefit of the doubt when reasoning telemetry is missing.
-func reasoningCapableModel(provider, modelName string) bool {
-	name := strings.ToLower(strings.TrimSpace(modelName))
-	switch provider {
-	case "openai", "openai-responses":
-		return strings.HasPrefix(name, "o1") || strings.HasPrefix(name, "o3") ||
-			strings.HasPrefix(name, "o4") || strings.HasPrefix(name, "gpt-5")
-	case "anthropic":
-		// Extended thinking exists from Claude 3.7 onward.
-		return !strings.Contains(name, "claude-3-") && !strings.Contains(name, "claude-2")
-	case "google":
-		// Gemini 2.5+ reports thoughtsTokenCount.
-		return strings.Contains(name, "gemini-2.5") || strings.Contains(name, "gemini-3")
-	default:
-		return false
-	}
-}
 func skippedCostAnchor() model.ProbeResult {
 	return model.ProbeResult{ProbeKey: "p6_cost_anchor", Kind: model.ProbeKindCostAnchor, Status: model.ProbeStatusSkip, Evidence: map[string]any{"reason": "standalone SDK mode has no gateway customer-price configuration"}}
 }
